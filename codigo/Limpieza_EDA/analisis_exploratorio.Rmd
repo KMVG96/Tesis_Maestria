@@ -1,0 +1,325 @@
+---
+title: "EDA_CONAFORT"
+author: "Katia M. Villarnobo gonzalez"
+date: "2025-06-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r setup, include=FALSE}
+##install.packages("readxl")
+library(readxl)
+library(dplyr)
+library(tidyverse)   # Incluye dplyr, ggplot2, readr, etc.
+library(summarytools)  # Para resumenes tabulados
+library(DataExplorer)  # Automatiza parte del EDA
+
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+
+# RUTA DEL ARCHIVO
+ruta ="C:/Users/katy/Documents/Tesis_Maestria/Tesis_Mestria/Datos_Crudos/CONAFORT/INFYS_Arbolado_2015_2020.xlsx"
+
+# Leer el archivo Excel
+datos <- read_excel(ruta)
+
+# Ver los primeros registros
+head(datos)
+
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+# Filtrar por estado con clave 23,  año 2019
+datos_filtrados <- datos %>% filter(Cve_Estado_C3 == 23 & Anio_C3 == 2019 & Especie_APG_C3 != "NULL" )
+
+## Geneno un nuebo data set solo con las variables que me importan 
+
+dataset_QR<-datos_filtrados %>% select(IdConglomerado,X_C3, Y_C3, NoIndividuo_C3, DiametroNormal_C3,
+                                       AlturaTotal_C3, AreaBasal_C3, NombreComun_C3, Familia_APG_C3,
+                                       Genero_APG_C3, Especie_APG_C3)
+
+# Ver las primeras filas del resultado
+head(dataset_QR)
+```
+
+¿
+```{r}
+
+summary(dataset_QR)         # Estadísticos descriptivos
+
+
+```
+```{r}
+dataset_QR_filtro<-dataset_QR %>% filter( DiametroNormal_C3< 999990 & AlturaTotal_C3< 999990 &
+                                            AreaBasal_C3< 999990 )
+
+summary(dataset_QR_filtro) 
+
+```
+```{r}
+# Histograma del diámetro normal
+hist(dataset_QR_filtro$DiametroNormal_C3,
+     main = "Histograma de diámetro normal",
+     xlab = "Diámetro Normal (cm)",
+     ylab="Frecuencia",
+     col = "lightblue",
+     border = "white")
+# Histograma de altura total
+hist(dataset_QR_filtro$ AlturaTotal_C3,
+     main = "Histograma de altura total",
+     xlab = "Altura Total (m)",
+     ylab="Frecuencia",
+     col = "lightblue",
+     border = "white")
+# Histograma de área basal 
+hist(dataset_QR_filtro$ AreaBasal_C3 ,
+     main = "Histograma del área basal",
+     xlab = "Área Basal (m²)",
+     ylab="Frecuencia",
+     col = "lightblue",
+     border = "white")
+     
+```
+
+
+
+```{r}
+# Exportar el dataset a un archivo CSV
+write.csv(dataset_QR_filtro, "dataset_QR_filtro.csv", row.names = FALSE)
+
+## NÚMERO TOTAL DE ESPECIES 
+length(unique(dataset_QR_filtro$Especie_APG_C3))
+
+```
+
+
+```{r}
+# Seleccionar variables numéricas + especie, filtrar extremos, quitar NAs
+pca_data <- dataset_QR_filtro %>%
+  select(Especie_APG_C3, DiametroNormal_C3, AlturaTotal_C3, AreaBasal_C3) %>%
+  filter(DiametroNormal_C3 < 999990,
+         AlturaTotal_C3 < 999990,
+         AreaBasal_C3 < 999990,
+         !is.na(Especie_APG_C3),
+         Especie_APG_C3 != "",
+         Especie_APG_C3 != "NULL") %>%
+  na.omit()
+
+```
+
+
+
+
+
+```{r}
+GEN<- substr(dataset_QR_filtro$Genero_APG_C3, 1,3)
+ESP<- substr(dataset_QR_filtro$Especie_APG_C3,1,3)
+join<- paste0(GEN,ESP)
+N_Cientifico <- paste(dataset_QR_filtro$Genero_APG_C3, dataset_QR_filtro$Especie_APG_C3)
+
+
+dataset_QR_filtro$Clave_ESP <- Clave_ESP
+dataset_QR_filtro$N_Cientifico <- N_Cientifico
+# Ver cuántos valores únicos tiene
+length(unique(dataset_QR_filtro$Clave_ESP))
+
+head(dataset_QR_filtro[, c("Genero_APG_C3", "Especie_APG_C3", "Clave_ESP")])
+
+
+
+frecuencia_especies <- dataset_QR_filtro %>%
+  group_by(Clave_ESP, Genero_APG_C3, Especie_APG_C3, N_Cientifico) %>%
+  summarise(frecuencia = n(), .groups = "drop") %>%
+  arrange(desc(frecuencia))
+
+print(frecuencia_especies)
+
+```
+
+## Ecuaciones por especie 
+ 5 y 8 y 7
+ 56 y 57
+ 
+ No encontradas:
+ #2
+ 	Thouinia paucidentata
+ 	Coccoloba spicata
+ 	Caesalpinia gaumeri
+ 	Gymnopodium floribundum
+ 	Croton reflexifolius
+ 	#3
+ 	Sabal yapa
+ 	#4
+ 	Croton arboreus
+  Exostema caribaeum
+  Thrinax radiata
+  Hampea trilobata
+# 5 lista
+# 6 lista 
+# 7
+Sideroxylon salicifolium
+#8
+Cryosophila argentea
+Semialarium mexicanum
+#9 
+Guettarda gaumeri
+Guettarda elliptica
+Casearia corymbosa
+#10
+Randia aculeata
+Beaucarnea pliabilis
+#12
+Randia longiloba
+
+#13
+Ardisia escallonioides
+Tecoma stans
+Guettarda macrosperma
+#14
+Coussapoa oligocephala
+#15
+Plumeria rubra
+Randia armata
+Croton draco
+#16
+Crossopetalum parviflorum
+Gymnanthes longipes
+Plumeria obtusa
+
+#17
+Adonidia merrillii
+Cryosophila stauracantha
+Fridericia floribunda
+
+#18 
+Bixa orellana
+Psidium salutare
+Psychotria pubescens
+#19
+Baccharis salicina
+#20
+Coccoloba padiformis
+Exostema mexicanum
+#21
+Mimosa bahamensis
+Murraya paniculata
+Pisonia aculeata
+Sabal mexicana
+Acoelorrhaphe wrightii
+Acrocomia aculeata
+#22
+Bunchosia sonorensis
+Caesalpinia pulcherrima
+#23
+Coccoloba floribunda
+Cocos nucifera
+Coccoloba obovata
+
+https://www.mdpi.com/1999-4907/13/5/649#app1-forests-13-00649
+```{r}
+
+ calcular_biomasa <- function(N_Cientifico, diametro, altura) {
+  if (N_Cientifico == "Lysiloma latisiliquum") {
+    exp(-10.01137401 + 1.97688779 * log(diametro) + 1.02860759 * log(altura)) # Lysiloma latisiliquum
+  } else if (N_Cientifico == "Bursera simaruba") {
+    exp(-9.88284891 + 1.92178549 * log(diametro) + 1.04714889 * log(altura)) # Bursera simaruba
+  } else if (N_Cientifico == "Piscidia piscipulare") {
+    0.00004 * diametro^2.12007 * altura^0.76244 # Piscidia piscipulare
+  } else if (N_Cientifico == "Metopium brownei") {
+    exp(-8.81312542 + 1.56449274 * log(diametro) + 1.08361129 * log(altura)) # Metopium brownei
+  } else if (N_Cientifico == "Vitex gaumeri") {
+    exp(-9.41737421 + 1.76385327 * log(diametro) + 1.04067089 * log(altura)) # Vitex gaumeri
+  } else if (N_Cientifico == "Manilkara zapota") {
+    exp(-9.84923104 + 1.91175328 * log(diametro) + 1.04555238 * log(altura)) # Manilkara zapota
+  } else if (N_Cientifico == "Pouteria reticulata") {
+    exp(-9.41737421 + 1.76385327 * log(diametro) + 1.04067089 * log(altura)) # Pouteria reticulata
+  } else if (N_Cientifico == "Gymnanthes lucida") {
+    exp(-9.41737421 + 1.76385327 * log(diametro) + 1.04067089 * log(altura)) # Gymnanthes lucida
+  } else if (N_Cientifico == "Lonchocarpus guatemalensis" ||
+             N_Cientifico == "Lonchocarpus rugosus") {
+    exp(-9.5643815 + 1.82330416 * log(diametro) + 1.01741981 * log(altura)) # Lonchocarpus guatemalensis, L. rugosus
+  } else if (N_Cientifico == "Diospyros tetrasperma") {
+    exp(-9.80397476 + 1.91686765 * log(diametro) + 1.02474479 * log(altura)) # Diospyros tetrasperma
+  } else if (N_Cientifico == "Nectandra salicifolia") {
+    exp(-9.75894522 + 1.90722681 * log(diametro) + 1.01257027 * log(altura)) # Nectandra salicifolia
+  } else if (N_Cientifico == "Brosimum alicastrum") {
+    exp(-9.53415154 + 1.85980581 * log(diametro) + 0.96989346 * log(altura)) # Brosimum alicastrum
+  } else if (N_Cientifico == "Luehea speciosa") {
+    exp(-9.52375084 + 1.81551953 * log(diametro) + 1.03039019 * log(altura)) # Luehea speciosa
+  } else if (N_Cientifico == "Dendropanax arboreus") {
+    exp(-9.05936092 + 1.68198628 * log(diametro) + 1.0337615 * log(altura)) # Dendropanax arboreus
+  } else if (N_Cientifico == "Pouteria campechiana") {
+    exp(-9.8528306 + 1.93994057 * log(diametro) + 1.0307694 * log(altura)) # Pouteria campechiana
+  } else if (N_Cientifico == "Guettarda combsii") {
+    exp(-9.82944377 + 1.9060093 * log(diametro) + 1.04047533 * log(altura)) # Guettarda combsii
+  } else if (N_Cientifico == "Neea psychotrioides") {
+    exp(-9.52375084 + 1.81551953 * log(diametro) + 1.03039019 * log(altura)) # Neea psychotrioides
+  } else if (N_Cientifico == "Coccoloba cozumelensis") {
+    exp(-9.45811109 + 1.82568462 * log(diametro) + 1.00281859 * log(altura)) # Coccoloba cozumelensis
+  } else if (N_Cientifico == "Alseis yucatanensis") {
+    exp(-9.75894522 + 1.90722681 * log(diametro) + 1.01257027 * log(altura)) # Alseis yucatanensis
+  } else if (N_Cientifico == "Swartzia cubensis") {
+    0.00005 * diametro^1.18838 * altura^1.84537 # Swartzia cubensis
+  } else if (N_Cientifico == "Ficus cotinifolia") {
+    exp(-9.5208709 + 1.85580925 * log(diametro) + 0.96207943 * log(altura)) # Ficus cotinifolia
+  } else if (N_Cientifico == "Psidium sartorianum") {
+    exp(-9.71122198 + 1.8428147 * log(diametro) + 1.05795417 * log(altura)) # Psidium sartorianum
+  } else if (N_Cientifico == "Cecropia peltata") {
+    exp(-9.41737421 + 1.76385327 * log(diametro) + 1.04067089 * log(altura)) # Cecropia peltata
+  } else if (N_Cientifico == "Spondias mombin") {
+    exp(-9.68220947 + 1.89488929 * log(diametro) + 1.01453225 * log(altura)) # Spondias mombin
+  } else if (N_Cientifico == "Mosannona depressa") {
+    exp(-9.52375084 + 1.81551953 * log(diametro) + 1.03039019 * log(altura)) # Mosannona depressa
+  } else if (N_Cientifico == "Exostema caribaeum") {
+    exp(-9.41737421 + 1.76385327 * log(diametro) + 1.04067089 * log(altura)) # Exostema caribaeum
+  } else if (N_Cientifico == "Trichilia havanensis") {
+    exp(-9.98357915 + 1.95005045 * log(diametro) + 1.05153755 * log(altura)) # Trichilia havanensis
+  } else if (N_Cientifico == "Pseudolmedia spuria" ||
+             N_Cientifico == "Pseudobombax ellipticum") {
+    exp(-9.52774573 + 1.76329569 * log(diametro) + 1.08168791 * log(altura)) # Pseudolmedia spuria, Pseudobombax ellipticum
+  } else if (N_Cientifico == "Ceiba aesculifolia") {
+    exp(-10.22400164 + 1.93392327 * log(diametro) + 1.12044335 * log(altura)) # Ceiba aesculifolia
+  } else if (N_Cientifico == "Gliricidia sepium") {
+    exp(-9.5643815 + 1.82330416 * log(diametro) + 1.01741981 * log(altura)) # Gliricidia sepium
+  } else {
+    NA # Si la especie no está en la lista
+  }
+}
+
+
+```
+
+
+```{r}
+# Calcular biomasa
+dataset_QR_filtro <- dataset_QR_filtro %>%
+  mutate(biomasa = pmap_dbl(
+    list(N_Cientifico, DiametroNormal_C3, AlturaTotal_C3),
+    calcular_biomasa
+  ))
+
+
+summary(dataset_QR_filtro$biomasa)
+head(dataset_QR_filtro[, c("N_Cientifico", "DiametroNormal_C3", "AlturaTotal_C3", "biomasa")])
+
+```
+
+
+
+

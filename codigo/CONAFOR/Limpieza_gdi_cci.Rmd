@@ -1,0 +1,453 @@
+---
+title: An R Markdown document converted from "/projects/ADE_biomass_harmonization/biomass_harmonization/NASA_CMS_2023/Mexico/GMB_Mexico.ipynb"
+output: html_document
+---
+
+
+---
+
+---
+
+```{r}
+############# AT THE START, WE INSTALL PACKAGES WE NEED ###################################
+
+# We use a package that might be new to some of you, called "INLA" 
+# This package helps implement Bayesian methods and helps make some of our steps fast/easy to implement
+# We will explain it as we go through this code 
+
+############# OPEN R, THEN RUN THE FOLLOWING COMMAND ###################
+
+install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+install.packages("fmesher", dependencies = TRUE)
+install.packages("MatrixModels", type = "source")
+install.packages("exactextractr")
+install.packages("sn" ,dependencies = TRUE)
+packages <- c("terra","dplyr","spdep", "exactextractr", "sf","ggplot2","viridis","sn","fmesher","exactextractr","fields")
+package.check <- lapply(packages, FUN = function(x) {
+    if (!require(x, character.only = TRUE)) {
+        install.packages(x, dependencies = TRUE)
+        library(x, character.only = TRUE, quietly=TRUE)
+    }
+})
+Sys.setenv("AWS_DEFAULT_REGION" = 'us-west-2')
+
+##### THE FOLLOWING COMMANDS ARE FOR THE INSTALLATION OF PACKAGES ON NASA MAAP #####
+##### CONDA-FORGE YOUR WAY THROUGH PACKAGES THAT DID NOT INSTALL ##########
+
+# conda install conda-forge::r-fmesher
+# conda install conda-forge::r-exactextractr
+# conda install conda-forge::r-sn
+# conda install conda-forge::r-inlabru
+# conda install conda-forge::r-fields
+```
+
+```{r}
+############## LOAD PACKAGES ###########
+
+library("fmesher")
+library(MatrixModels)
+library(Matrix)
+library(INLA)
+library(inlabru)
+library("jpeg")
+
+library(sf)
+library(terra)
+library(dplyr)
+library(spdep)
+library(raster)
+library(exactextractr)
+library(INLA)
+library(inlabru)
+
+library(ggplot2)
+library(viridis)
+library(sn)
+```
+
+
+```{r}
+### Objetivo Particular: 1. Cargar y Preprocesar Datos
+
+######################## LOAD THE OUTLINE OF MEXICO AND ADMIN BOUNDARIES #############
+options(repr.plot.width=10, repr.plot.height=10)
+
+# Carga el límite y lo proyecta a 32616
+mexico = st_read("C:/Users/katy/Documents/Tesis_katy_github/codigo/CONAFOR/QuintanaRoo_Entidad_wgs84.gpkg", quiet = TRUE) %>% st_union() %>% st_transform(crs = 32616) 
+
+# Carga el ráster
+Deforestation_raster = terra::rast("C:/Users/katy/Documents/Tesis_katy_github/codigo/CONAFOR/GFC_Deforestacion_QRoo.TIF") 
+
+# Reproyecta el ráster a 32616
+Deforestation= terra::project(
+  x = Deforestation_raster,
+  y = "epsg:32616" 
+)
+
+```
+
+```{r}
+
+# BLOQUE DE CÓDIGO FALTANTE:
+# Prepara el ráster proyectado 'Deforestation' como data frame para ggplot2
+
+# 1. Convierte el objeto ráster 'Deforestation' (que está en CRS 32616)
+#    a un data frame, incluyendo las coordenadas x e y (xy = TRUE).
+Deforestation_df = as.data.frame(Deforestation, xy = TRUE) 
+
+# 2. Renombra la columna de valores del ráster para que coincida con la usada en ggplot.
+#    Asumimos que la tercera columna (índice 3) contiene los valores del año de pérdida.
+names(Deforestation_df)[3] = "Loss_Year"
+```
+
+
+
+
+
+```{r}
+# ########################## READ THE MEXICAN NFI DATA ###################################
+plot_WGS84 <- st_read("C:/Users/katy/Documents/Tesis_katy_github/codigo/CONAFOR/INF_WGS84.gpkg", quiet = TRUE)
+
+# Sample 90% of the data randomly for training and 10% for testing
+dt = sort(sample(nrow(plot_WGS84), nrow(plot_WGS84)*.9))
+plot_WGS84 <- plot_WGS84[dt,]
+plot_WGS84_T <- plot_WGS84[-dt,]
+
+loc.plot.WGS84 <- st_coordinates(plot_WGS84)  ### get the plot locations in WGS84
+plot = plot_WGS84 %>% st_transform("epsg:32616") ### convert them to a projected CRS
+agbd.plot = plot$biomasa_kg_C3 ### get the AGBD estimate at each plot location
+loc.plot = st_coordinates(plot) ### save the plot location xy coordinates in projected CRS
+# Esta línea extrae la columna de Biomasa (AGB_C3) del objeto espacial 'plot'.
+agbd.plot = plot$biomasa_kg_C3 ### get the AGBD estimate at each plot location 
+
+# Verifica:
+
+
+```
+
+
+```{r}
+length(unique(plot_WGS84$IdConglomerado))
+```
+```{r}
+library(sf)
+library(ggplot2)
+
+ggplot(plot) +
+  geom_sf(aes(color = biomasa_kg_C3), size = 1) +
+  scale_color_viridis_c(option = "plasma", trans = "log10") +
+  labs(
+    title = "Distribución espacial de la biomasa",
+    color = "Biomasa (kg)"
+  ) +
+  theme_minimal()
+
+```
+```{r}
+# ============================================
+# MAPA DE ALTURA DE VEGETACIÓN (GEDI) - QUINTANA ROO
+# Limitado a 0-30 metros
+# ============================================
+
+library(terra)
+library(ggplot2)
+library(tidyterra)
+
+# Cargar el raster de altura
+hei.rast <- rast("C:/Users/katy/Documents/Tesis_Maestria/Forest_height_QROO_metricas.tif")
+
+```
+
+```{r}
+mexico_vect <- vect(mexico)
+
+crs(hei.rast)
+crs(mexico_vect)
+
+hei.rast <- project(hei.rast, crs(mexico_vect))
+
+hei_clip <- mask(
+  crop(hei.rast, mexico_vect),
+  mexico_vect
+)
+
+
+```
+```{r}
+plot(hei_clip)
+plot(mexico_vect, add = TRUE)
+
+```
+
+```{r}
+summary(hei_clip)
+
+
+```
+
+```{r}
+# Píxeles válidos (>0)
+n_total <- ncell(hei_clip)
+
+n_validos <- n_total - n_ceros - n_na
+
+data.frame(
+  Total_pixeles = n_total,
+  Pixeles_cero = n_ceros,
+  Pixeles_NA = n_na,
+  Pixeles_validos = n_validos,
+  Porcentaje_cero = round(100 * n_ceros / n_total, 2),
+  Porcentaje_NA = round(100 * n_na / n_total, 2)
+)
+```
+```{r}
+hei_clean <- ifel(hei_clip < 1, NA, hei_clip)
+
+```
+
+```{r}
+summary(hei_clean)
+
+```
+
+
+
+
+```{r}
+
+# ============================================
+# MAPA - Altura de 0 a 30 metros
+# ============================================
+
+ggplot() +
+  geom_spatraster(data = hei_clean) +
+  scale_fill_gradientn(
+    colors = c("black", "saddlebrown", "tan", "yellowgreen", "forestgreen", "darkgreen"),
+    name = "Altura\n(m)",
+    na.value = "transparent",
+    limits = c(0, 30),
+    oob = scales::squish
+  ) +
+  labs(
+    title = "Altura de Vegetación (GEDI-NASA) en Quintana Roo",
+    x = "Longitud",
+    y = "Latitud"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14))
+```
+
+
+```{r}
+# ============================================
+# HISTOGRAMA DE ALTURA DE VEGETACIÓN (GEDI)
+# Limitado a 0-30 metros
+# ============================================
+
+library(terra)
+library(ggplot2)
+
+# Cargar el raster
+hei.rast <- rast("C:/Users/katy/Documents/Tesis_Maestria/Forest_height_QROO_metricas.tif")
+
+# Extraer los valores como vector
+valores <- values(hei.rast, na.rm = TRUE)
+
+# Convertir a dataframe para ggplot
+df <- data.frame(Altura = as.numeric(valores))
+
+# Filtrar valores entre 0 y 30 metros
+df <- df[df$Altura >= 0 & df$Altura <= 30, , drop = FALSE]
+
+# Histograma
+ggplot(df, aes(x = Altura)) +
+  geom_histogram(bins = 50, fill = "forestgreen", color = "white", alpha = 0.8) +
+  labs(
+    title = "Distribución de Altura de Vegetación (GEDI-NASA)",
+    subtitle = "Quintana Roo",
+    x = "Altura (m)",
+    y = "Frecuencia"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+# Densidad (alternativa más suave)
+ggplot(df, aes(x = Altura)) +
+  geom_density(fill = "yellowgreen", alpha = 0.6) +
+  labs(
+    title = "Distribución de Altura de Vegetación (GEDI-NASA)",
+    subtitle = "Quintana Roo",
+    x = "Altura (m)",
+    y = "Densidad"
+  ) +
+  theme_minimal()
+
+# Estadísticas básicas (solo 0-30 m)
+summary(df$Altura)
+```
+
+
+```{r}
+
+####################### LOAD THE GLAD FOREST HEIGHTS MAP #######################
+
+# NOTA: Usamos tu nueva ruta local. Asumimos que este archivo está en EPSG:32616.
+hei.rast = rast("C:/Users/katy/Documents/Tesis_Maestria/Forest_height_QROO_metricas.tif") 
+
+# Este es otro método para hacer lo mismo 
+# (ahora comentado y reemplazado por el método más robusto a continuación).
+# hei.plot = terra::extract(hei.rast, st_buffer(plot,56.42)) 
+# hei.plot = aggregate(x = hei.plot$GLAD_FH_mexico_UINT16_C_6399, by = list(hei.plot$ID), FUN = mean, na.rm=TRUE)[,2] 
+# ggplot() + coord_sf(crs = 32616) + geom_point(aes(x = loc.plot[,1], y = loc.plot[,2], col = hei.plot),size=0.5) + scale_color_viridis()
+
+# In case the weighted-average of pixels under the plot of radius 56.4 m is required, please use the lines below
+# --- MÉTODO RECOMENDADO: exactextractr ---
+# Calcula el promedio de altura dentro del buffer de 56.42m (parcela de 1 ha)
+hei.plot = exactextractr::exact_extract(
+  hei.rast, 
+  st_buffer(plot, 56.42), 
+  'mean'
+)
+
+# --- VISUALIZACIÓN DE LOS RESULTADOS DE ALTURA ---
+
+ggplot() + 
+  coord_sf(crs = 32616) + 
+  geom_point(aes(x = loc.plot[,1], y = loc.plot[,2], col = hei.plot), size = 2) + 
+  scale_color_viridis(name = "Altura GEDI (m)") + # Etiqueta más clara para la leyenda
+  theme_minimal() +
+  labs(title = "Alturas promedio GEDI extraídas en parcelas NFI")
+
+
+
+```
+ ccci
+ 
+```{r}
+# Cargar el raster
+cci.rast <- rast("C:/Users/katy/Documents/Tesis_Maestria/ESA AGBD/CCI_CORTE_QINTANAROO.tif")
+
+```
+ 
+```{r}
+mexico_vect <- vect(mexico)
+
+crs(cci.rast)
+crs(mexico_vect)
+
+cci.rast <- project(cci.rast, crs(mexico_vect))
+
+cci_clip <- mask(
+  crop(cci.rast, mexico_vect),
+  mexico_vect
+)
+
+
+```
+```{r}
+plot(cci_clip)
+plot(mexico_vect, add = TRUE)
+```
+```{r}
+summary(cci_clip)
+```
+
+```{r}
+cci_clean <- ifel(cci_clip < 1, NA, cci_clip)
+```
+
+```{r}
+summary(cci)
+```
+
+
+```{r}
+library(terra)
+library(ggplot2)
+
+
+# Extraer los valores como vector
+valores <- values(cci_clean, na.rm = TRUE)
+
+# Convertir a dataframe para ggplot
+df <- data.frame(AGBD = as.numeric(valores))
+
+# Histograma
+ggplot(df, aes(x = AGBD)) +
+  geom_histogram(bins = 50, fill = "forestgreen", color = "white", alpha = 0.8) +
+  labs(
+    title = "Distribución de Biomasa Aérea (CCI-ESA)",
+    subtitle = "Quintana Roo",
+    x = "AGBD (Mg/ha)",
+    y = "Frecuencia"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+# Densidad (alternativa más suave)
+ggplot(df, aes(x = AGBD)) +
+  geom_density(fill = "yellowgreen", alpha = 0.6) +
+  labs(
+    title = "Distribución de Biomasa Aérea (CCI-ESA)",
+    x = "AGBD (Mg/ha)",
+    y = "Densidad"
+  ) +
+  theme_minimal()
+
+# Estadísticas básicas
+summary(valores)
+```
+
+```{r}
+
+valores <- values(cci_clean, na.rm = TRUE)
+df <- data.frame(AGBD = as.numeric(valores))
+
+
+# ============================================
+# 2. MAPA - Valores bajos en negro
+# ============================================
+
+# Opción 1: Paleta personalizada (negro a verde)
+# Paleta verde invertida (negro en valores bajos, amarillo en altos)
+ggplot() +
+  geom_spatraster(data = cci.rast) +
+  scale_fill_gradientn(
+    colors = c("black","lightyellow","khaki","gold","yellowgreen", "forestgreen", "darkgreen"),
+    name = "AGBD\n(Mg/ha)",
+    na.value = "transparent"
+  ) +
+  labs(
+    title = "Biomasa Aérea (CCI-ESA) en Quintana Roo",
+    x = "Longitud",
+    y = "Latitud"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+
+```
+
+
+```{r}
+library(terra)
+
+writeRaster(
+  cci_clip,
+  "C:/Users/katy/Documents/Tesis_katy_github/codigo/CONAFOR/tif_limpios/biomasa.tif",
+  filetype = "GTiff",
+  overwrite = TRUE
+)
+```
+
+```{r}
+
+writeRaster(
+  cci_clip,
+  "C:/Users/katy/Documents/Tesis_katy_github/codigo/CONAFOR/tif_limpios/hei.tif",
+  filetype = "GTiff",
+  overwrite = TRUE
+)
+
+```
+

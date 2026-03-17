@@ -1,0 +1,1348 @@
+---
+title: An R Markdown document converted from "/projects/ADE_biomass_harmonization/biomass_harmonization/NASA_CMS_2023/Mexico/GMB_Mexico.ipynb"
+output: html_document
+---
+
+
+---
+
+### RESUMEN DEL SCRIPT
+
+**Objetivo General:**
+Este script tiene como objetivo principal desarrollar un modelo geoestadístico bayesiano (Geostatistical Model-Based, GMB) para estimar la Densidad de Biomasa Aérea (AGBD) en Quintana Roo, México. Para ello, integra datos de campo del Inventario Nacional Forestal (NFI) con productos de teledetección, específicamente el mapa de biomasa de la ESA (CCI) y el mapa de altura del dosel de GEDI.
+
+**Objetivos Particulares:**
+1.  **Cargar y Preprocesar Datos:** Cargar y alinear los datos del NFI, el ráster de biomasa CCI y el ráster de altura GEDI.
+2.  **Construir el Modelo:** Crear un modelo espacial jerárquico utilizando el paquete `INLA` en R para predecir la biomasa del NFI en función de las covariables de teledetección (CCI y GEDI).
+3.  **Validar el Modelo:** Evaluar el rendimiento del modelo final comparando sus predicciones con un subconjunto de datos del NFI que no se utilizó durante el entrenamiento.
+4.  **Aplicar el Modelo (Secciones Opcionales):** Utilizar el modelo entrenado para realizar diversas tareas de predicción, como:
+    *   Rellenar valores de biomasa faltantes (`NA`) en el conjunto de datos del NFI.
+    *   Estimar la biomasa promedio para estratos ecológicos más grandes (DESECON).
+    *   Predecir la biomasa en áreas de interés (ej. zonas de deforestación).
+    *   Comparar las predicciones del modelo con otros mapas de biomasa existentes (ej. el mapa de CONAFOR).
+
+**¿Se puede ejecutar completamente con los datos actuales?**
+**No.** Con los archivos que tienes actualmente, puedes ejecutar exitosamente las secciones de **carga de datos, entrenamiento del modelo y validación del modelo**.
+
+Sin embargo, las **secciones finales de aplicación y comparación no se podrán ejecutar** porque requieren archivos de datos adicionales que no tienes, como el mapa de estratos DESECON y el mapa de biomasa de CONAFOR. En el script se ha añadido una sección que detalla exactamente qué archivos te faltan para poder completar todo el análisis.
+
+---
+
+
+
+importar bicliotecas
+```{r}
+############## LOAD PACKAGES ###########
+
+library("fmesher")
+library(MatrixModels)
+library(Matrix)
+library(INLA)
+library(inlabru)
+library("jpeg")
+
+library(sf)
+library(terra)
+library(dplyr)
+library(spdep)
+library(raster)
+library(exactextractr)
+library(INLA)
+library(inlabru)
+
+library(ggplot2)
+library(viridis)
+library(sn)
+```
+
+This notebook shows how to integrate Mexican NFI-estimated AGBD (3rd cycle), ESA CCI Biomass AGBD (see https://climate.esa.int/en/projects/biomass/) and GEDI Forest Height estimates (see https://glad.umd.edu/dataset/gedi). 
+
+It is based on the FAIR (findable, accessible, interoperable, and replicable) Data Principles (Wilkinson et al., 2016), and relies on the computational power of the INLA Package in R (https://www.r-inla.org/).  
+
+Practical applications are demonstrated at the end of this notebook. They include using our models for gap-filling Mexico's NFI, and estimation of mean AGBD (with associated uncertainty) in their forest/administrative strata. 
+
+We have also created two psuedo areas where diturbance will occur in the future. At the end of this notebook, we will predict AGBD in these areas before disturbance using all of the above data!
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+################################# Model-assisted vs model-based #################################
+
+The approach presented in this notebook is a Geostatistical Model-Based (GMB) approach. 
+
+As noted from McRoberts et at (2022): With model-based inference each population unit is assumed to have an entire distribution of possible values as opposed to design-based inference, for which each population unit is assumed to have one and only one possible value. Standard model-based terminology specifies use of the verb “to predict” when referring to random variables and “to estimate” when referring to fixed value parameters. Model-based inferences do not require probability samples, although they can be used, and in many instances may be preferable.
+
+Bayesian inference is used in our approach, whereby we approximate the distribution of our model parameters and predict AGBD at any given location. 
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+
+################################# Geostatistical Model-based Estimation #########################
+
+Our target variable (AGBD) at any given location (s) is assumed to follow the following linear model
+
+\begin{align}
+y(s) = \alpha + \beta.x(s) + \epsilon(s)
+\end{align}
+
+Where y(s) is the estimated AGBD at location s, and x(s) is a covariate (e.g. CCI Biomass map). Further, $\epsilon(s)$ is the random error. This should be straightforward to solve. However, the errors of $\alpha$ and $\beta$ could be spatially varying across the extent of Mexico, and hence may not be "fixed". To deal with this, we add a spatially-varying term to $\alpha$ and $\beta$ that will capture this variance.  
+
+\begin{align}
+y(s) = (\alpha + \tilde{\alpha}(s)) + (\beta + \tilde{\beta}(s)).x(s) + \epsilon(s)
+\end{align}
+
+Further, if you wanted to add another covariate (e.g. the CCI as well as a map of GEDI height estimates) to predict AGBD, the model will look like
+
+\begin{align}
+y(s) = (\alpha + \tilde{\alpha}(s)) + (\beta + \tilde{\beta}(s)).x1(s) + (\eta + \tilde{\eta}(s)).x2(s) + \epsilon(s) 
+\end{align}
+
+Most of the values should be familiar. $\alpha$, $\beta$ and $\eta$ are constant regression parameters. x1 and x2 are our covariates (here, the CCI map and the GEDI height map). $\alpha$, $\beta$ and $\eta$ have associated errors $\tilde{\alpha}$, $\tilde{\beta}$ and $\tilde{\eta}$ that are spatially autocorrelated. These errors capture the spatially-varying component of $\alpha$, $\beta$ and $\eta$. If you solve this equation at every location s, you will have accounted for the spatial dependence among residuals of the model. In a Bayesian hierarchical framework, it is possible to estimate the spatial covariance parameters and, hence, propagate their uncertainties through to the prediction of the outcome variable (Babcock et al. 2015). 
+
+A caveat, however, is that solving the above model is natively is computationally expensive when the number of observations becomes large. We can circumvent this by splitting Mexico up into (very) small regions. This is done by the use of a mesh, and approximating the model outputs for each node/vertex of the mesh. So, we first define an underlying "mesh", which draws a graph of triangles across the study area. On the vertices of triangles, we define a neighbor-based spatial model where two vertices are neighbors if there is a triangle edge connecting them. To extend this to continuous locations, the value of $\tilde{\alpha}$, $\tilde{\beta}$ and $\tilde{\eta}$ at any location (s) lying within a triangle is linearly interpolated from the 3 vertices of the containing triangle. The reason why this is more computationally effecient is that the process on the vertices is sparse, i.e. for any given vertex, it only needs the information from the connected vertices. This will become clearer as we go through the code. 
+
+```{r}
+### Objetivo Particular: 1. Cargar y Preprocesar Datos
+
+######################## LOAD THE OUTLINE OF MEXICO AND ADMIN BOUNDARIES #############
+options(repr.plot.width=10, repr.plot.height=10)
+
+# Carga el límite y lo proyecta a 32616
+mexico = st_read("C:/Users/katy/Documents/Tesis_katy_github/codigo/CONAFOR/QuintanaRoo_Entidad_wgs84.gpkg", quiet = TRUE) %>% st_union() %>% st_transform(crs = 32616) 
+
+```
+
+
+
+
+
+```{r}
+# ########################## READ THE MEXICAN NFI DATA ###################################
+
+
+plot_WGS84 <- st_read("C:/Users/katy/Documents/Tesis_katy_github/codigo/CONAFOR/INF_WGS84.gpkg", 
+                       quiet = TRUE)
+
+# ========================== CONVERSIÓN DE UNIDADES ==========================
+# Suma biomasa por individuo a nivel parcela y convierte kg → Mg/ha
+
+# plot_WGS84 <- plot_WGS84 %>%
+#   group_by(IdConglomerado) %>%
+#   mutate(
+#     biomasa_Mg_ha = sum(biomasa_kg_C3, na.rm = TRUE) / 1000  # kg por parcela → Mg/ha
+#   ) %>%
+#   ungroup() %>%
+#   filter(
+#     !is.na(biomasa_Mg_ha),
+#     biomasa_Mg_ha > 0
+#   )
+
+# ========================== TRAIN / TEST SPLIT ==========================
+
+dt <- sort(sample(nrow(plot_WGS84), nrow(plot_WGS84) * .9))
+plot_WGS84   <- plot_WGS84[dt, ]   # 90% entrenamiento
+plot_WGS84_T <- plot_WGS84[-dt, ]  # 10% prueba
+
+# ========================== COORDENADAS Y PROYECCIÓN ==========================
+
+loc.plot.WGS84 <- st_coordinates(plot_WGS84)           # coordenadas en WGS84
+plot <- plot_WGS84 %>% st_transform("epsg:32616")       # reproyectar a UTM zona 16N
+loc.plot <- st_coordinates(plot)                        # coordenadas en UTM (metros)
+
+# ========================== VARIABLE RESPUESTA ==========================
+# 
+agbd.plot <- plot$biomasa_kg_C3  # ahora en Mg/ha en lugar de kg
+# 
+# # Verifica:
+# print(length(agbd.plot))
+# print(summary(agbd.plot))         # útil para ver rango de valores
+
+```
+
+```{r}
+library(geodata)
+library(sf)
+library(ggplot2)
+
+# Capa de México a nivel municipio (nivel 2)
+mexico_mun <- gadm(country = "MEX", level = 2, path = tempdir()) %>% 
+              st_as_sf()
+
+# Filtrar solo Quintana Roo
+qroo <- mexico_mun %>% filter(NAME_1 == "Quintana Roo")
+
+# Filtrar parcelas dentro de Quintana Roo
+parcelas_qroo <- st_filter(plot_WGS84, qroo)
+
+# Mapa
+ggplot() +
+  # Fondo: municipios de Quintana Roo
+  geom_sf(data = qroo, fill = "grey95", color = "grey50", linewidth = 0.5) +
+
+  # Puntos de parcelas
+  geom_sf(data = parcelas_qroo,
+          aes(color = biomasa_kg_C3),
+          size = 2.5, alpha = 0.85) +
+
+  # Paleta verde mejorada
+  scale_color_gradientn(
+    colors = c("#FFFFCC", "#A1D99B", "#41AB5D", "#006D2C", "#00441B"),
+    name   = "Biomasa\n(Mg/ha)",
+    guide = guide_colorbar(barwidth = 1, barheight = 10)
+  ) +
+
+  labs(
+    title    = "Biomasa Aérea por Parcela del INFyS",
+    subtitle = "Quintana Roo — División municipal",
+    caption  = "Fuente: INFyS - CONAFOR | GADM",
+    x = "Longitud", y = "Latitud"
+  ) +
+
+  theme_minimal() +
+  theme(
+    plot.title    = element_text(face = "bold", size = 14, hjust = 0.5),
+    plot.subtitle = element_text(size = 11, color = "grey40", hjust = 0.5),
+    plot.caption = element_text(size = 9, color = "grey50"),
+    legend.position = "right",
+    panel.grid.minor = element_blank()
+  )
+```
+
+```{r}
+# ============================================
+# MAPA DE ALTURA DE VEGETACIÓN (GEDI) - QUINTANA ROO
+# Limitado a 0-30 metros
+# ============================================
+
+library(terra)
+library(ggplot2)
+library(tidyterra)
+
+# Cargar el raster de altura
+hei.rast <- rast("C:/Users/katy/Documents/Tesis_katy_github/codigo/CONAFOR/tif_limpios/hei.tif")
+
+# ============================================
+# MAPA - Altura de 0 a 30 metros
+# ============================================
+
+ggplot() +
+  geom_spatraster(data = hei.rast) +
+  scale_fill_gradientn(
+    colors = c("#000000", "#8B4513", "#D2B48C", "#9ACD32", "#228B22", "#006400"),
+    name = "Altura\n(m)",
+    na.value = "transparent",
+    limits = c(0, 30),
+    oob = scales::squish,
+    guide = guide_colorbar(barwidth = 1, barheight = 10)
+  ) +
+  labs(
+    title = "Altura de Vegetación (GEDI-NASA) en Quintana Roo",
+    x = "Longitud",
+    y = "Latitud"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+        legend.position = "right",
+        panel.grid.minor = element_blank())
+```
+
+```{r}
+summary(hei.rast)
+```
+
+
+
+```{r}
+# ============================================
+# HISTOGRAMA DE ALTURA DE VEGETACIÓN (GEDI)
+# Limitado a 0-30 metros
+# ============================================
+
+# Extraer los valores como vector
+valores <- values(hei.rast, na.rm = TRUE)
+
+# Convertir a dataframe para ggplot
+df <- data.frame(Altura = as.numeric(valores))
+
+# Filtrar valores entre 0 y 30 metros
+df <- df[df$Altura >= 0 & df$Altura <= 30, , drop = FALSE]
+
+# Histograma
+ggplot(df, aes(x = Altura)) +
+  geom_histogram(bins = 50, fill = "#2ecc71", color = "white", alpha = 0.85) +
+  labs(
+    title = "Distribución de Altura de Vegetación (GEDI-NASA)",
+    subtitle = "Quintana Roo",
+    x = "Altura (m)",
+    y = "Frecuencia"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+        plot.subtitle = element_text(size = 11, color = "grey40", hjust = 0.5),
+        panel.grid.minor = element_blank())
+
+# Densidad (alternativa más suave)
+ggplot(df, aes(x = Altura)) +
+  geom_density(fill = "#27ae60", color = "#1e8449", alpha = 0.7, linewidth = 1) +
+  labs(
+    title = "Distribución de Altura de Vegetación (GEDI-NASA)",
+    subtitle = "Quintana Roo",
+    x = "Altura (m)",
+    y = "Densidad"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+        plot.subtitle = element_text(size = 11, color = "grey40", hjust = 0.5),
+        panel.grid.minor = element_blank())
+
+# Estadísticas básicas (solo 0-30 m)
+summary(df$Altura)
+```
+
+```{r}
+
+
+# Cargar el raster
+cci.rast <- rast("C:/Users/katy/Documents/Tesis_katy_github/codigo/CONAFOR/tif_limpios/biomasa.tif")
+
+# Extraer los valores como vector
+valores <- values(cci.rast, na.rm = TRUE)
+
+# Convertir a dataframe para ggplot
+df <- data.frame(AGBD = as.numeric(valores))
+
+# Histograma
+ggplot(df, aes(x = AGBD)) +
+  geom_histogram(bins = 50, fill = "#e67e22", color = "white", alpha = 0.85) +
+  labs(
+    title = "Distribución de Biomasa Aérea (CCI-ESA)",
+    subtitle = "Quintana Roo",
+    x = "AGBD (Mg/ha)",
+    y = "Frecuencia"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+        plot.subtitle = element_text(size = 11, color = "grey40", hjust = 0.5),
+        panel.grid.minor = element_blank())
+
+# Densidad (alternativa más suave)
+ggplot(df, aes(x = AGBD)) +
+  geom_density(fill = "#d68910", color = "#935116", alpha = 0.7, linewidth = 1) +
+  labs(
+    title = "Distribución de Biomasa Aérea (CCI-ESA)",
+    subtitle = "Quintana Roo",
+    x = "AGBD (Mg/ha)",
+    y = "Densidad"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+        plot.subtitle = element_text(size = 11, color = "grey40", hjust = 0.5),
+        panel.grid.minor = element_blank())
+
+# Estadísticas básicas
+summary(valores)
+```
+
+```{r}
+
+ggplot() +
+  geom_spatraster(data = cci.rast) +
+  scale_fill_gradientn(
+    colors = c("#000000", "#ffffcc", "#78c679", "#238443", "#004529"),
+    name = "AGBD\n(Mg/ha)",
+    na.value = "transparent",
+    guide = guide_colorbar(barwidth = 1, barheight = 10)
+  ) +
+  labs(
+    title = "Biomasa Aérea (CCI-ESA) en Quintana Roo",
+    x = "Longitud",
+    y = "Latitud"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+        legend.position = "right",
+        panel.grid.minor = element_blank())
+
+
+```
+
+
+
+```{r}
+
+
+# In case the weighted-average of pixels under the plot of radius 56.4 m is required, please use the lines below 
+cci.plot = exactextractr::exact_extract(cci.rast, st_buffer(plot,56.42), 'mean')
+hei.plot = exactextractr::exact_extract(  hei.rast,   st_buffer(plot, 56.42),   'mean')
+ggplot() +
+  coord_sf(crs = 32616) +
+  geom_point(aes(x = loc.plot[,1], y = loc.plot[,2], col = cci.plot), size = 2.5, alpha = 0.7) +
+  scale_color_viridis(option = "plasma", name = "AGBD\n(Mg/ha)") +
+  labs(title = "Biomasa Aérea CCI-ESA en Parcelas INFyS",
+       x = "Este (m)", y = "Norte (m)") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
+        legend.position = "right")
+
+ggplot() +
+  coord_sf(crs = 32616) +
+  geom_point(aes(x = loc.plot[,1], y = loc.plot[,2], col = hei.plot), size = 2.5, alpha = 0.7) +
+  scale_color_viridis(option = "viridis", name = "Altura\n(m)") +
+  labs(title = "Altura de Vegetación GEDI en Parcelas INFyS",
+       x = "Este (m)", y = "Norte (m)") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
+        legend.position = "right")
+
+
+DATA_FULL <- data.frame(
+  X_coord = loc.plot[,1],
+  Y_coord = loc.plot[,2],
+  cci.plot = cci.plot,  # Columna para la Biomasa CCI
+  hei.plot = hei.plot,  # Columna para la Altura GEDI
+  agbd.plot = agbd.plot # Columna para la Biomasa NFI
+  
+) 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GUARDAR PRODUCTOS DERIVADOS EN GMB_MODIFICADO
+# ══════════════════════════════════════════════════════════════════════════════
+output_dir <- "C:/Users/katy/Documents/Tesis_katy_github/codigo/CONAFOR/GMB_MODIFICADO"
+write.csv(DATA_FULL, file.path(output_dir, "NFI_CCI_GEDIheights_2.csv"), row.names=FALSE)
+
+
+
+
+```
+
+
+
+```{r}
+# ── Librerías ────────────────────────────────────────────────────────────────
+library(ggplot2)
+
+# ── Datos ────────────────────────────────────────────────────────────────────
+# Leer desde GMB_MODIFICADO
+output_dir <- "C:/Users/katy/Documents/Tesis_katy_github/codigo/CONAFOR/GMB_MODIFICADO"
+DATA <- read.csv(file.path(output_dir, "NFI_CCI_GEDIheights_2.csv"))
+
+cci.plot  <- DATA$cci.plot
+hei.plot  <- DATA$hei.plot
+agbd.plot <- DATA$agbd.plot
+loc.plot  <- data.frame(X = DATA$X_coord, Y = DATA$Y_coord)
+
+# ── Opciones de gráfico ───────────────────────────────────────────────────────
+options(repr.plot.width = 6, repr.plot.height = 4)
+
+# ── GRÁFICA 1: NFI vs. CCI ───────────────────────────────────────────────────
+ggplot(data = DATA, aes(x = agbd.plot, y = cci.plot)) +
+  geom_bin2d(bins = 100) +
+  scale_fill_viridis_c(option = "plasma", name = "Conteo", direction = 1) +
+  xlab("NFI-estimated AGBD [Mg/ha]") +
+  ylab("CCI-estimated AGBD [Mg/ha]") +
+  ggtitle("Relación entre NFI y CCI") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        panel.grid.minor = element_blank(),
+        legend.position = "right")
+
+# ── GRÁFICA 2: NFI vs. GEDI ──────────────────────────────────────────────────
+ggplot(data = DATA, aes(x = agbd.plot, y = hei.plot)) +
+  geom_bin2d(bins = 100) +
+  scale_fill_viridis_c(option = "inferno", name = "Conteo", direction = 1) +
+  xlab("NFI-estimated AGBD [Mg/ha]") +
+  ylab("GEDI-estimated heights [m]") +
+  ggtitle("Relación entre NFI y GEDI") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        panel.grid.minor = element_blank(),
+        legend.position = "right")
+
+# ── Transformación logarítmica ────────────────────────────────────────────────
+# Se usa log1p (log(1+x)) para evitar log(0) = -Inf cuando agbd.plot = 0
+DATA$agbd.plot_log <- log1p(DATA$agbd.plot)
+
+# ── GRÁFICA 3: log(NFI) vs. CCI ──────────────────────────────────────────────
+ggplot(data = DATA, aes(x = agbd.plot_log, y = cci.plot)) +
+  geom_bin2d(bins = 100) +
+  scale_fill_viridis_c(option = "magma", name = "Conteo", direction = 1) +
+  xlab("log(1 + NFI-estimated AGBD) [Mg/ha]") +
+  ylab("CCI-estimated AGBD [Mg/ha]") +
+  ggtitle("Relación entre log(NFI) y CCI") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        panel.grid.minor = element_blank(),
+        legend.position = "right")
+
+# ── GRÁFICA 4: log(NFI) vs. GEDI ─────────────────────────────────────────────
+ggplot(data = DATA, aes(x = agbd.plot_log, y = hei.plot)) +
+  geom_bin2d(bins = 100) +
+  scale_fill_viridis_c(option = "viridis", name = "Conteo", direction = 1) +
+  xlab("log(1 + NFI-estimated AGBD) [Mg/ha]") +
+  ylab("GEDI-estimated heights [m]") +
+  ggtitle("Relación entre log(NFI) y GEDI") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        panel.grid.minor = element_blank(),
+        legend.position = "right")
+```
+
+### Objetivo Particular: 2. Construir el Modelo (Introducción)
+
+## BUILDING THE GEOSPATIAL MODEL WE DEFINED FOR MEXICO ###########
+
+Since we are now familiar with INLA, let's try to solve our model: 
+
+\begin{align}
+y(s) = (\alpha + \tilde{\alpha}(s)) + (\beta + \tilde{\beta}(s)).x1(s) + (\eta + \tilde{\eta}(s)).x2(s) + \epsilon(s)
+\end{align}
+
+Solving this model is computationally expensive. Instead, an approximation of the solutions can be constructed, typically based upon discretizations of space, i.e. breaking Mexico up by a mesh. The solutions then, in turn, are an approximation of the true solution. This method of discretization is called a finite element method (FEM), very commonly used in physics and engineering.
+
+The steps followed below are first explained in words: 
+
+(1) We start with building a mesh over Mexico. These are our finite elements. 
+
+(2) We then define a spatial model for each spatially-varying parameter ($\tilde{\alpha}(s)$, $\tilde{\beta}(s)$ and $\tilde{\eta}(s)$), and we ask INLA to solve it!
+
+Once INLA has done its job, we can check our model residuals and make predictions at our hold-out 10% of NFI plot locations. 
+
+Also, we can get values of $(\alpha + \tilde{\alpha}(s))$, $(\beta + \tilde{\beta}(s))$ and $(\eta + \tilde{\eta}(s))$ for any location we want! 
+
+Since we will have the model's fixed parameters and their spatially-varying components, we can get predicted AGBD at any location we want. 
+This means, we can find a patch of newly deforested land, and predict what baseline AGBD would have been there (for example). 
+We can also predict AGBD and compare it to CONAFOR's 1 km gridded map. 
+
+
+```{r}
+################### MAKING A MESH SURFACE OVER MEXICO ###################
+library(INLA)
+library(sf)
+library(ggplot2)
+
+options(repr.plot.width = 10, repr.plot.height = 10)
+
+# --- 1. PREPARACIÓN Y LIMPIEZA DE OBJETOS ---
+mexico_proj <- st_make_valid(mexico) %>% st_transform(crs = 32616)
+
+data_for_plot <- data.frame(
+  X    = loc.plot[, 1],
+  Y    = loc.plot[, 2],
+  agbd = agbd.plot
+)
+data_for_plot <- na.omit(data_for_plot)
+
+# --- 2. CREACIÓN DE LA MALLA SPDE ---
+max.edge     <- 15 * 10^3  # 15 km
+mexico.buffer <- st_buffer(mexico_proj, dist = max.edge * 5)  # Buffer 75 km
+
+mesh <- inla.mesh.2d(
+  boundary = list(
+    as(mexico_proj,  "Spatial"),
+    as(mexico.buffer, "Spatial")
+  ),
+  max.edge = c(max.edge, 3 * max.edge),
+  cutoff   = 2 * max.edge / 3,
+  offset   = c(max.edge, 5 * max.edge)
+)
+
+# --- 3. RECORTE DE TRIÁNGULOS POR CENTROIDES ---
+# Extraer la matriz de triángulos (índices de vértices)
+tv <- mesh$graph$tv
+
+# Calcular el centroide de cada triángulo
+centroides <- data.frame(
+  x = (mesh$loc[tv[, 1], 1] + mesh$loc[tv[, 2], 1] + mesh$loc[tv[, 3], 1]) / 3,
+  y = (mesh$loc[tv[, 1], 2] + mesh$loc[tv[, 2], 2] + mesh$loc[tv[, 3], 2]) / 3
+)
+
+centroides_sf <- st_as_sf(centroides, coords = c("x", "y"), crs = 32616)
+
+# Buffer pequeño sobre México para incluir bordes costeros e insulares
+mexico_borde <- st_buffer(mexico_proj, dist = 50)
+
+# Triángulos cuyo centroide cae dentro del polígono ampliado
+triangulos_validos <- st_within(centroides_sf, mexico_borde, sparse = FALSE)[, 1]
+tv_validos          <- tv[triangulos_validos, ]
+
+# --- 4. RECONSTRUIR ARISTAS DE LOS TRIÁNGULOS VÁLIDOS ---
+edges_validos <- rbind(
+  cbind(tv_validos[, 1], tv_validos[, 2]),
+  cbind(tv_validos[, 2], tv_validos[, 3]),
+  cbind(tv_validos[, 1], tv_validos[, 3])
+)
+
+mesh_df_validos <- data.frame(
+  x    = mesh$loc[edges_validos[, 1], 1],
+  y    = mesh$loc[edges_validos[, 1], 2],
+  xend = mesh$loc[edges_validos[, 2], 1],
+  yend = mesh$loc[edges_validos[, 2], 2]
+)
+
+# --- 5. VISUALIZACIÓN ---
+ggplot() +
+  
+  geom_sf(data = mexico_proj,
+          fill = "grey95", color = "grey40", linewidth = 0.5) +
+  
+  geom_segment(data = mesh_df_validos,
+               aes(x = x, y = y, xend = xend, yend = yend),
+               color = "steelblue", linewidth = 0.2, alpha = 0.7) +
+  
+  geom_point(data = data_for_plot,
+             aes(x = X, y = Y, fill = agbd),
+             shape = 21, size = 2.5, color = "white", stroke = 0.3) +
+  
+  scale_fill_gradientn(
+    colors = c("#ffffcc", "#78c679", "#238443", "#004529"),
+    name   = "Biomasa\n(Mg/ha)"
+  ) +
+  
+  labs(
+    title    = "Malla SPDE — México",
+    subtitle = paste0("Triángulos: ", sum(triangulos_validos), " | Nodos: ", mesh$n),
+    caption  = "Fuente: INFyS - CONAFOR",
+    x = "Este (m)", y = "Norte (m)"
+  ) +
+  
+  theme_minimal() +
+  theme(
+    plot.title    = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10, color = "grey40"),
+    legend.position = "right"
+  )
+k = mesh$n 
+print(paste("Número de vértices de la malla (k):", k))
+```
+
+
+```{r}
+######################## INTERPOLATING OUR MESH TO EACH PLOT ##################
+
+# Now, we have our data at NFI locations and we have our mesh with k vertices. Wonderful! 
+# Next, we need a way to link the k mesh vertices to the n plot locations.
+# This is achieved using a projector matrix (A.plot). For every NFI plot location, we come up with three weights, corresponding to the proportional 
+# area to nodes/vertices of each triangle containing each NFI plot. We will explain this better in an accompanying presentation at the workshop.
+# The sum of the three weights given to three vertices contain an NFI plot will be 1.   
+# This results in a huge matrix of dimensions n_NFI_plots x n_vertices matrix.
+
+options(repr.plot.width=8, repr.plot.height=5)
+
+# Example_weights <- readJPEG("/projects/ADE_biomass_harmonization/biomass_harmonization/NASA_CMS_2023/Mexico/Aplot.jpg",native=TRUE)
+# plot(0:1,0:1,type="n",ann=FALSE,axes=FALSE)
+# rasterImage(Example_weights,0,0,1,1)
+# 
+# Example_Aplot <- readJPEG("/projects/ADE_biomass_harmonization/biomass_harmonization/NASA_CMS_2023/Mexico/Aplot_matrix.jpg",native=TRUE)
+# plot(0:1,0:1,type="n",ann=FALSE,axes=FALSE)
+# rasterImage(Example_Aplot,0,0,1,1)
+
+loc.plot = data.matrix(loc.plot)
+A.plot = inla.spde.make.A(mesh = mesh, loc = loc.plot)
+
+# You can look more closely into what A.plot looks like, but it should be rather intuitive: 
+paste("These are the number of rows (NFI plots) times the number of columns (vertices) in our mesh:", dim(A.plot)[1], "and", dim(A.plot)[2]) 
+# dim(A.plot) gives you number of rows (9863 NFI plots) x number of columns (16094 vertices in our mesh)
+# Matrix::rowSums(A.plot) ### And this tells you that the sum of all rows = 1, meaning the sum of weights at each NFI plot is 1
+
+### Finally, here is a great resource for understanding spatial effects: https://www.paulamoraga.com/book-geospatial/sec-geostatisticaldataexamplespatial.html
+```
+
+```{r}
+### Objetivo Particular: 2. Construir el Modelo (Definición de Modelos Espaciales SPDE)
+
+######################## MAKING A SPATIAL MODEL FOR ALPHA, BETA AND ETA  ##################
+
+# This part is a little tricky. What you want to do is establish that alpha_tilde, beta_tilde, and eta_tilde 
+# must be modelled with a covariance function, such that covariance between any two locations will depend on the relative 
+# distance between them. There are many ways to define this function, but commonly used family of covariance function is the 
+# Matérn covariance function. Matérn covariance function is probably the most commonly used one in geostatistics. 
+# We do not want to dive into the math here (we can do that later), but let's, for now, understand just this: 
+
+# Taking alpha_tilde as an example, we want to know the "range" (in units of meters) at which alpha_tilde will 
+# decay in correlation with distance. Similarly, we want to know the "range" at which beta_tilde and eta_tilde decays. 
+# And, we want to know what is the standard deviation (SD) of the Guassian process. 
+
+# In the followng, we simply supply these spatial models using INLA. We also supply some "prior probability" bound on the data, meaning, we give 
+# INLA a starting point to optimize the model fitting. This is just a best guess on how the spatially-varying parameters are expected to behave. 
+
+# Priors for the varying intercept alpha_tilde
+spde.alpha = inla.spde2.pcmatern(mesh, 
+                                 prior.range = c(30*10^3, 0.01), # This says the probability that the range is LESS than 30 km is 0.01
+                                 prior.sigma = c(60, 0.01)) # This says the probability that the SD is GREATER than 60 Mg/ha is 0.01
+
+# Priors for the varying coefficient beta_tilde
+spde.beta = inla.spde2.pcmatern(mesh, 
+                                prior.range = c(30*10^3, 0.01), # Same interpretations as above here
+                                prior.sigma = c(1, 0.5)) # This says the probability that the SD is GREATER than 1 is 0.5
+
+# Priors for the varying coefficient eta_tilde
+spde.eta = inla.spde2.pcmatern(mesh, 
+                                prior.range = c(30*10^3, 0.01), # Same interpretations as above here
+                                prior.sigma = c(1, 0.5)) # This says the probability that the SD is GREATER than 1 is 0.5
+
+# If you are keen on understanding the range and SD parameters and intuitively see how the work, here is a nice simulation: 
+```
+
+```{r}
+### Objetivo Particular: 2. Construir el Modelo (Preparación de Datos para INLA)
+
+###################### SETTING UP THE MODEL SO THAT INLA CAN RUN IT ##################
+
+# This cell simply rearranges all the data we have into the right syntax/format needed by INLA to solve the model. 
+# Let's have a recap what data we have:  
+# (1) We have NFI AGBD, CCI AGBD and Forest Height at each NFI location
+# (2) We have an awesome mesh covering Mexico in little triangles that encompass the NFI plot locations
+# (3) We have a projector matrix (A.plot), which gives each NFI location 3 weights from the nearest vertices of the containing triangle
+# (4) We have a spatial-model that will help us understand the spatially-varying errors alpha-tilde, beta-tilde, and eta-tilde
+
+### First, we just construct our formula, which we need to provide to INLA #####
+formula = agbd ~ # This is the NFI-estimated AGBD, which we have to predict
+  -1 +           # This informs INLA that it should not use a default intercept, but use the one we provide
+  intercept +    # Intercept
+  cci +          # CCI values
+  hei +          # Forest height values
+  f(alpha.spat, model = spde.alpha) + # Spatially-varying error term, modelled with spde.alpha
+  f(beta.spat, model = spde.beta) +   # Spatially-varying error term, modelled with spde.beta
+  f(eta.spat, model = spde.eta)       # Spatially-varying error term, modelled with spde.eta
+
+#### Second, we arrange our data so we can supply it to INLA to input in the formula above #####
+# The INLA stack is provided as three separate lists: 
+# (1) The "data" list, which is only our NFI-estimated AGBD at each plot
+# (2) The "A" list, which contains our projection matrices for each model parameter. For alpha, beta and eta, this is just 1. 
+#     But for alpha-tilde, beta-tilde and eta-tilde, we use A.plot to "project" on our mesh nodes! 
+# (3) The "effects" list, which contains the actual values of our model parameters. We have observations of CCI and Forest 
+#     height. For all other model parameters (i.e. the intercept and the random effects), we just supply an index.  
+n.plot <- length(agbd.plot)
+stack = inla.stack(data = list(agbd = agbd.plot),
+                   A = list(1, # tell INLA we expect an intercept, and the projection matrix is just "1"
+                            1, # tell INLA we expect a cci biomass value, and the projection matrix for its parameter is just "1"
+                            1, # tell INLA we expect a forest height value, and the projection matrix for its parameter is just "1"
+                            A.plot, # tell INLA we have a mesh projected onto the plot locations for alpha-tilde 
+                            Diagonal(x = cci.plot)%*%A.plot, # tell INLA to multiply our mesh with CCI values for beta-tilde
+                            Diagonal(x = hei.plot)%*%A.plot),# tell INLA to multiply our mesh with forest height values for eta-tilde
+                   effects = list(
+                     intercept = rep(1, n.plot), # The intercept just given an index equal to 1
+                     cci = cci.plot, # Supply INLA with the CCI values
+                     hei = hei.plot, # Supply INLA with the Forest Height values
+                     alpha.spat = 1:k, # The random effects just need to given unique indices at each mesh node.
+                     beta.spat = 1:k, # The random effects just need to given unique indices at each mesh node.
+                     eta.spat = 1:k # The random effects just need to given unique indices at each mesh node.
+                   ))
+```
+
+---
+
+## MODELO 1: Raíz Cuadrada (SQRT) 
+
+```{r}
+### Objetivo Particular: 2. Construir el Modelo (Ajuste del Primer Modelo INLA)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODELO CON TRANSFORMACION: RAIZ CUADRADA
+# ══════════════════════════════════════════════════════════════════════════════
+
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════╗\n")
+cat("║  TRANSFORMACION APLICADA: RAIZ CUADRADA (SQRT)                 ║\n")
+cat("╚════════════════════════════════════════════════════════════════╝\n")
+
+# Aplicar transformación
+agbd.plot_sqrt <- sqrt(DATA$agbd.plot)
+
+cat("Rango original:", range(DATA$agbd.plot, na.rm = TRUE), "\n")
+cat("Rango transformado:", range(agbd.plot_sqrt, na.rm = TRUE), "\n\n")
+
+###################### SET THE MODEL RUNNING ###############################
+model_fit = inla(formula = formula,
+                 family = 'gaussian',
+                 data = inla.stack.data(stack),
+                 control.predictor = list(A = inla.stack.A(stack)),
+                 control.compute = list(config = TRUE, dic = TRUE, waic = TRUE, cpo = TRUE),
+                 verbose = TRUE)
+
+summary(model_fit)
+
+# ============================================================================
+# COEFICIENTES MÁS PROBABLES DEL MODELO SQRT
+# ============================================================================
+cat("\n")
+cat("══════════════════════════════════════════════════════════════════════════════\n")
+cat("  COEFICIENTES MÁS PROBABLES - MODELO SQRT (Raíz Cuadrada)\n")
+cat("══════════════════════════════════════════════════════════════════════════════\n\n")
+
+coef_table <- model_fit$summary.fixed[, c("mean", "sd", "0.025quant", "0.5quant", "0.975quant")]
+rownames(coef_table) <- c("Alpha (Intercepto)", "Beta (CCI)", "Eta (GEDI)")
+
+cat("Interpretación: sqrt(Biomasa) = Alpha + Beta × CCI + Eta × GEDI + efectos espaciales\n\n")
+print(round(coef_table, 4))
+
+cat("\n")
+cat("Valores más probables (media posterior):\n")
+cat("  • Alpha (Intercepto): ", round(model_fit$summary.fixed[1, "mean"], 4),
+    " ± ", round(model_fit$summary.fixed[1, "sd"], 4), "\n")
+cat("  • Beta (CCI):         ", round(model_fit$summary.fixed[2, "mean"], 4),
+    " ± ", round(model_fit$summary.fixed[2, "sd"], 4), "\n")
+cat("  • Eta (GEDI):         ", round(model_fit$summary.fixed[3, "mean"], 4),
+    " ± ", round(model_fit$summary.fixed[3, "sd"], 4), "\n")
+cat("\nIntervalos de credibilidad al 95%:\n")
+cat("  • Alpha: [", round(model_fit$summary.fixed[1, "0.025quant"], 4), ", ",
+    round(model_fit$summary.fixed[1, "0.975quant"], 4), "]\n")
+cat("  • Beta:  [", round(model_fit$summary.fixed[2, "0.025quant"], 4), ", ",
+    round(model_fit$summary.fixed[2, "0.975quant"], 4), "]\n")
+cat("  • Eta:   [", round(model_fit$summary.fixed[3, "0.025quant"], 4), ", ",
+    round(model_fit$summary.fixed[3, "0.975quant"], 4), "]\n")
+cat("══════════════════════════════════════════════════════════════════════════════\n\n")
+
+# ============================================================================
+# DIAGNOSTICO DEL MODELO SQRT
+# ============================================================================
+pit_sqrt <- model_fit$cpo$pit[!is.na(model_fit$cpo$pit)]
+ks_sqrt <- ks.test(pit_sqrt, "punif")
+
+cat("DIC:", round(model_fit$dic$dic, 2), "\n")
+cat("WAIC:", round(model_fit$waic$waic, 2), "\n")
+cat("PIT Media:", round(mean(pit_sqrt), 4), "\n")
+cat("PIT SD:", round(sd(pit_sqrt), 4), "\n")
+cat("KS p-valor:", format(ks_sqrt$p.value, digits = 4), "\n\n")
+
+# Histograma PIT para diagnóstico del modelo
+hist(model_fit$cpo$pit, breaks = 20,
+     main = "Distribución PIT - Modelo SQRT",
+     xlab = "Valores PIT",
+     ylab = "Frecuencia",
+     col = "#3498db",
+     border = "white",
+     las = 1)
+
+# Guardar modelo en GMB_MODIFICADO
+save(model_fit, file = file.path(output_dir, "INLA_model_fit.RData"))
+```
+
+---
+
+## TRANSFORMACION 2: Logaritmo Natural (LOG)
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# MODELO CON TRANSFORMACIÓN: LOGARITMO NATURAL
+# ══════════════════════════════════════════════════════════════════════════════
+
+TRANSFORMACION <- "log"
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════╗\n")
+cat("║  TRANSFORMACIÓN APLICADA: LOGARITMO NATURAL (LOG)              ║\n")
+cat("╚════════════════════════════════════════════════════════════════╝\n")
+
+# Aplicar transformación
+agbd.plot_log <- log1p(DATA$agbd.plot)  # log(1+x) para evitar log(0)
+
+cat("Rango original:", range(DATA$agbd.plot, na.rm = TRUE), "\n")
+cat("Rango transformado:", range(agbd.plot_log, na.rm = TRUE), "\n\n")
+
+# Construir modelo
+stack_log = inla.stack(
+  data = list(agbd = agbd.plot_log),
+  A = list(1, 1, 1, A.plot, Diagonal(x = cci.plot)%*%A.plot, Diagonal(x = hei.plot)%*%A.plot),
+  effects = list(
+    intercept = rep(1, n.plot), cci = cci.plot, hei = hei.plot,
+    alpha.spat = 1:k, beta.spat = 1:k, eta.spat = 1:k
+  )
+)
+
+model_log = inla(
+  formula = formula,  # Misma fórmula
+  family = 'gaussian',
+  data = inla.stack.data(stack_log),
+  control.predictor = list(A = inla.stack.A(stack_log)),
+  control.compute = list(config = TRUE, dic = TRUE, waic = TRUE, cpo = TRUE),
+  verbose = FALSE
+)
+summary(model_log)
+
+# ============================================================================
+# COEFICIENTES MÁS PROBABLES DEL MODELO LOG
+# ============================================================================
+cat("\n")
+cat("══════════════════════════════════════════════════════════════════════════════\n")
+cat("  COEFICIENTES MÁS PROBABLES - MODELO LOG (Logaritmo Natural)\n")
+cat("══════════════════════════════════════════════════════════════════════════════\n\n")
+
+coef_table_log <- model_log$summary.fixed[, c("mean", "sd", "0.025quant", "0.5quant", "0.975quant")]
+rownames(coef_table_log) <- c("Alpha (Intercepto)", "Beta (CCI)", "Eta (GEDI)")
+
+cat("Interpretación: log(1 + Biomasa) = Alpha + Beta × CCI + Eta × GEDI + efectos espaciales\n\n")
+print(round(coef_table_log, 4))
+
+cat("\n")
+cat("Valores más probables (media posterior):\n")
+cat("  • Alpha (Intercepto): ", round(model_log$summary.fixed[1, "mean"], 4),
+    " ± ", round(model_log$summary.fixed[1, "sd"], 4), "\n")
+cat("  • Beta (CCI):         ", round(model_log$summary.fixed[2, "mean"], 4),
+    " ± ", round(model_log$summary.fixed[2, "sd"], 4), "\n")
+cat("  • Eta (GEDI):         ", round(model_log$summary.fixed[3, "mean"], 4),
+    " ± ", round(model_log$summary.fixed[3, "sd"], 4), "\n")
+cat("\nIntervalos de credibilidad al 95%:\n")
+cat("  • Alpha: [", round(model_log$summary.fixed[1, "0.025quant"], 4), ", ",
+    round(model_log$summary.fixed[1, "0.975quant"], 4), "]\n")
+cat("  • Beta:  [", round(model_log$summary.fixed[2, "0.025quant"], 4), ", ",
+    round(model_log$summary.fixed[2, "0.975quant"], 4), "]\n")
+cat("  • Eta:   [", round(model_log$summary.fixed[3, "0.025quant"], 4), ", ",
+    round(model_log$summary.fixed[3, "0.975quant"], 4), "]\n")
+cat("══════════════════════════════════════════════════════════════════════════════\n\n")
+
+# ============================================================================
+# DIAGNOSTICO DEL MODELO LOG
+# ============================================================================
+pit_log <- model_log$cpo$pit[!is.na(model_log$cpo$pit)]
+ks_log <- ks.test(pit_log, "punif")
+
+cat("DIC:", round(model_log$dic$dic, 2), "\n")
+cat("WAIC:", round(model_log$waic$waic, 2), "\n")
+cat("PIT Media:", round(mean(pit_log), 4), "\n")
+cat("PIT SD:", round(sd(pit_log), 4), "\n")
+cat("KS p-valor:", format(ks_log$p.value, digits = 4), "\n\n")
+
+# Histograma PIT para diagnóstico del modelo
+hist(model_log$cpo$pit, breaks = 20,
+     main = "Distribución PIT - Modelo LOG",
+     xlab = "Valores PIT",
+     ylab = "Frecuencia",
+     col = "#e74c3c",
+     border = "white",
+     las = 1)
+
+# Guardar modelo
+save(model_log, file = file.path(output_dir, "INLA_model_log.RData"))
+```
+
+---
+
+## TRANSFORMACIÓN 4: Sin Transformación (DATOS ORIGINALES)
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# MODELO SIN TRANSFORMACIÓN (DATOS ORIGINALES)
+# ══════════════════════════════════════════════════════════════════════════════
+
+TRANSFORMACION <- "none"
+cat("\n")
+cat("╔════════════════════════════════════════════════════════════════╗\n")
+cat("║  TRANSFORMACIÓN APLICADA: NINGUNA (DATOS ORIGINALES)           ║\n")
+cat("╚════════════════════════════════════════════════════════════════╝\n")
+
+# Sin transformación
+agbd.plot_none <- DATA$agbd.plot
+
+cat("Rango de datos:", range(agbd.plot_none, na.rm = TRUE), "\n\n")
+
+# Construir modelo
+stack_none = inla.stack(
+  data = list(agbd = agbd.plot_none),
+  A = list(1, 1, 1, A.plot, Diagonal(x = cci.plot)%*%A.plot, Diagonal(x = hei.plot)%*%A.plot),
+  effects = list(
+    intercept = rep(1, n.plot), cci = cci.plot, hei = hei.plot,
+    alpha.spat = 1:k, beta.spat = 1:k, eta.spat = 1:k
+  )
+)
+
+model_none = inla(
+  formula = formula,
+  family = 'gaussian',
+  data = inla.stack.data(stack_none),
+  control.predictor = list(A = inla.stack.A(stack_none)),
+  control.compute = list(config = TRUE, dic = TRUE, waic = TRUE, cpo = TRUE),
+  verbose = FALSE
+)
+summary(model_none)
+
+# ============================================================================
+# COEFICIENTES MÁS PROBABLES DEL MODELO NONE
+# ============================================================================
+cat("\n")
+cat("══════════════════════════════════════════════════════════════════════════════\n")
+cat("  COEFICIENTES MÁS PROBABLES - MODELO NONE (Sin Transformación)\n")
+cat("══════════════════════════════════════════════════════════════════════════════\n\n")
+
+coef_table_none <- model_none$summary.fixed[, c("mean", "sd", "0.025quant", "0.5quant", "0.975quant")]
+rownames(coef_table_none) <- c("Alpha (Intercepto)", "Beta (CCI)", "Eta (GEDI)")
+
+cat("Interpretación: Biomasa = Alpha + Beta × CCI + Eta × GEDI + efectos espaciales\n\n")
+print(round(coef_table_none, 4))
+
+cat("\n")
+cat("Valores más probables (media posterior):\n")
+cat("  • Alpha (Intercepto): ", round(model_none$summary.fixed[1, "mean"], 4),
+    " ± ", round(model_none$summary.fixed[1, "sd"], 4), "\n")
+cat("  • Beta (CCI):         ", round(model_none$summary.fixed[2, "mean"], 4),
+    " ± ", round(model_none$summary.fixed[2, "sd"], 4), "\n")
+cat("  • Eta (GEDI):         ", round(model_none$summary.fixed[3, "mean"], 4),
+    " ± ", round(model_none$summary.fixed[3, "sd"], 4), "\n")
+cat("\nIntervalos de credibilidad al 95%:\n")
+cat("  • Alpha: [", round(model_none$summary.fixed[1, "0.025quant"], 4), ", ",
+    round(model_none$summary.fixed[1, "0.975quant"], 4), "]\n")
+cat("  • Beta:  [", round(model_none$summary.fixed[2, "0.025quant"], 4), ", ",
+    round(model_none$summary.fixed[2, "0.975quant"], 4), "]\n")
+cat("  • Eta:   [", round(model_none$summary.fixed[3, "0.025quant"], 4), ", ",
+    round(model_none$summary.fixed[3, "0.975quant"], 4), "]\n")
+cat("══════════════════════════════════════════════════════════════════════════════\n\n")
+
+# ============================================================================
+# DIAGNOSTICO DEL MODELO NONE
+# ============================================================================
+pit_none <- model_none$cpo$pit[!is.na(model_none$cpo$pit)]
+ks_none <- ks.test(pit_none, "punif")
+
+cat("DIC:", round(model_none$dic$dic, 2), "\n")
+cat("WAIC:", round(model_none$waic$waic, 2), "\n")
+cat("PIT Media:", round(mean(pit_none), 4), "\n")
+cat("PIT SD:", round(sd(pit_none), 4), "\n")
+cat("KS p-valor:", format(ks_none$p.value, digits = 4), "\n\n")
+
+# Histograma PIT para diagnóstico del modelo
+hist(model_none$cpo$pit, breaks = 20,
+     main = "Distribución PIT - Modelo NONE",
+     xlab = "Valores PIT",
+     ylab = "Frecuencia",
+     col = "#2ecc71",
+     border = "white",
+     las = 1)
+
+# Guardar modelo
+save(model_none, file = file.path(output_dir, "INLA_model_none.RData"))
+```
+
+---
+
+## COMPARACION ENTRE LOS TRES MODELOS
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# TABLA COMPARATIVA DE COEFICIENTES
+# ══════════════════════════════════════════════════════════════════════════════
+
+cat("\n")
+cat("╔══════════════════════════════════════════════════════════════════════════════╗\n")
+cat("║                 COMPARACIÓN DE COEFICIENTES ENTRE MODELOS                    ║\n")
+cat("╚══════════════════════════════════════════════════════════════════════════════╝\n\n")
+
+# Crear tabla comparativa
+comparacion <- data.frame(
+  Coeficiente = c("Alpha (Intercepto)", "Beta (CCI)", "Eta (GEDI)"),
+
+  SQRT_Media = round(model_fit$summary.fixed$mean, 4),
+  SQRT_SD = round(model_fit$summary.fixed$sd, 4),
+
+  LOG_Media = round(model_log$summary.fixed$mean, 4),
+  LOG_SD = round(model_log$summary.fixed$sd, 4),
+
+  NONE_Media = round(model_none$summary.fixed$mean, 4),
+  NONE_SD = round(model_none$summary.fixed$sd, 4)
+)
+
+print(comparacion, row.names = FALSE)
+
+cat("\n")
+cat("──────────────────────────────────────────────────────────────────────────────\n")
+cat("  MÉTRICAS DE AJUSTE DEL MODELO\n")
+cat("──────────────────────────────────────────────────────────────────────────────\n\n")
+
+metricas <- data.frame(
+  Modelo = c("SQRT", "LOG", "NONE"),
+  DIC = round(c(model_fit$dic$dic, model_log$dic$dic, model_none$dic$dic), 2),
+  WAIC = round(c(model_fit$waic$waic, model_log$waic$waic, model_none$waic$waic), 2),
+  PIT_Media = round(c(
+    mean(model_fit$cpo$pit, na.rm = TRUE),
+    mean(model_log$cpo$pit, na.rm = TRUE),
+    mean(model_none$cpo$pit, na.rm = TRUE)
+  ), 4),
+  PIT_SD = round(c(
+    sd(model_fit$cpo$pit, na.rm = TRUE),
+    sd(model_log$cpo$pit, na.rm = TRUE),
+    sd(model_none$cpo$pit, na.rm = TRUE)
+  ), 4)
+)
+
+print(metricas, row.names = FALSE)
+
+cat("\n")
+cat("NOTAS:\n")
+cat("  • DIC y WAIC: Menores valores indican mejor ajuste\n")
+cat("  • PIT Media: Debe estar cerca de 0.5 para un modelo bien calibrado\n")
+cat("  • PIT SD: Debe estar cerca de 0.289 (SD de Uniforme[0,1])\n")
+cat("──────────────────────────────────────────────────────────────────────────────\n\n")
+
+# Mejor modelo según DIC
+mejor_dic <- metricas$Modelo[which.min(metricas$DIC)]
+mejor_waic <- metricas$Modelo[which.min(metricas$WAIC)]
+
+cat("MEJOR MODELO SEGUN DIC:  ", mejor_dic, "\n")
+cat("MEJOR MODELO SEGUN WAIC: ", mejor_waic, "\n\n")
+```
+
+---
+
+## VALIDACION Y VISUALIZACION DE EFECTOS ESPACIALES
+
+### Objetivo Particular: 3. Validar los 3 modelos y visualizar efectos espaciales
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# PREPARAR DATOS PARA LOS 3 MODELOS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Extraer vértices válidos (solo Quintana Roo)
+vertices_validos <- unique(as.vector(tv_validos))
+
+# MODELO SQRT
+mean_alpha.spat_sqrt <- model_fit$summary.random[[1]]$mean
+mean_beta.spat_sqrt <- model_fit$summary.random[[2]]$mean
+mean_eta.spat_sqrt <- model_fit$summary.random[[3]]$mean
+
+# MODELO LOG
+mean_alpha.spat_log <- model_log$summary.random[[1]]$mean
+mean_beta.spat_log <- model_log$summary.random[[2]]$mean
+mean_eta.spat_log <- model_log$summary.random[[3]]$mean
+
+# MODELO NONE
+mean_alpha.spat_none <- model_none$summary.random[[1]]$mean
+mean_beta.spat_none <- model_none$summary.random[[2]]$mean
+mean_eta.spat_none <- model_none$summary.random[[3]]$mean
+
+# Crear dataframe consolidado
+mesh_df_consolidated <- data.frame(
+  x = mesh$loc[vertices_validos, 1],
+  y = mesh$loc[vertices_validos, 2],
+  # SQRT
+  alpha_sqrt = mean_alpha.spat_sqrt[vertices_validos],
+  beta_sqrt = mean_beta.spat_sqrt[vertices_validos],
+  eta_sqrt = mean_eta.spat_sqrt[vertices_validos],
+  # LOG
+  alpha_log = mean_alpha.spat_log[vertices_validos],
+  beta_log = mean_beta.spat_log[vertices_validos],
+  eta_log = mean_eta.spat_log[vertices_validos],
+  # NONE
+  alpha_none = mean_alpha.spat_none[vertices_validos],
+  beta_none = mean_beta.spat_none[vertices_validos],
+  eta_none = mean_eta.spat_none[vertices_validos]
+)
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# MAPAS COMPARATIVOS: ALPHA-TILDE (Intercepto Espacial)
+# ══════════════════════════════════════════════════════════════════════════════
+
+library(gridExtra)
+library(ggplot2)
+
+p1_alpha <- ggplot() +
+  geom_sf(data = mexico_proj, fill = "grey98", color = "grey50", linewidth = 0.4) +
+  geom_point(data = mesh_df_consolidated,
+             aes(x = x, y = y, color = alpha_sqrt), size = 1.2, alpha = 0.8) +
+  scale_color_viridis(option = "plasma", name = "α-tilde",
+                      guide = guide_colorbar(barwidth = 0.8, barheight = 8)) +
+  labs(title = "SQRT", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+        legend.position = "right",
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill = "aliceblue", color = NA))
+
+p2_alpha <- ggplot() +
+  geom_sf(data = mexico_proj, fill = "grey98", color = "grey50", linewidth = 0.4) +
+  geom_point(data = mesh_df_consolidated,
+             aes(x = x, y = y, color = alpha_log), size = 1.2, alpha = 0.8) +
+  scale_color_viridis(option = "plasma", name = "α-tilde",
+                      guide = guide_colorbar(barwidth = 0.8, barheight = 8)) +
+  labs(title = "LOG", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+        legend.position = "right",
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill = "aliceblue", color = NA))
+
+p3_alpha <- ggplot() +
+  geom_sf(data = mexico_proj, fill = "grey98", color = "grey50", linewidth = 0.4) +
+  geom_point(data = mesh_df_consolidated,
+             aes(x = x, y = y, color = alpha_none), size = 1.2, alpha = 0.8) +
+  scale_color_viridis(option = "plasma", name = "α-tilde",
+                      guide = guide_colorbar(barwidth = 0.8, barheight = 8)) +
+  labs(title = "NONE", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+        legend.position = "right",
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill = "aliceblue", color = NA))
+
+grid.arrange(p1_alpha, p2_alpha, p3_alpha, ncol = 3,
+             top = grid::textGrob("Distribución Espacial de Alpha-tilde (Intercepto Espacial)",
+                                  gp = grid::gpar(fontsize = 14, fontface = "bold")))
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# MAPAS COMPARATIVOS: BETA-TILDE (Efecto Espacial de CCI)
+# ══════════════════════════════════════════════════════════════════════════════
+
+p1_beta <- ggplot() +
+  geom_sf(data = mexico_proj, fill = "grey98", color = "grey50", linewidth = 0.4) +
+  geom_point(data = mesh_df_consolidated,
+             aes(x = x, y = y, color = beta_sqrt), size = 1.2, alpha = 0.8) +
+  scale_color_viridis(option = "inferno", name = "β-tilde",
+                      guide = guide_colorbar(barwidth = 0.8, barheight = 8)) +
+  labs(title = "SQRT", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+        legend.position = "right",
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill = "aliceblue", color = NA))
+
+p2_beta <- ggplot() +
+  geom_sf(data = mexico_proj, fill = "grey98", color = "grey50", linewidth = 0.4) +
+  geom_point(data = mesh_df_consolidated,
+             aes(x = x, y = y, color = beta_log), size = 1.2, alpha = 0.8) +
+  scale_color_viridis(option = "inferno", name = "β-tilde",
+                      guide = guide_colorbar(barwidth = 0.8, barheight = 8)) +
+  labs(title = "LOG", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+        legend.position = "right",
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill = "aliceblue", color = NA))
+
+p3_beta <- ggplot() +
+  geom_sf(data = mexico_proj, fill = "grey98", color = "grey50", linewidth = 0.4) +
+  geom_point(data = mesh_df_consolidated,
+             aes(x = x, y = y, color = beta_none), size = 1.2, alpha = 0.8) +
+  scale_color_viridis(option = "inferno", name = "β-tilde",
+                      guide = guide_colorbar(barwidth = 0.8, barheight = 8)) +
+  labs(title = "NONE", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+        legend.position = "right",
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill = "aliceblue", color = NA))
+
+grid.arrange(p1_beta, p2_beta, p3_beta, ncol = 3,
+             top = grid::textGrob("Distribución Espacial de Beta-tilde (Efecto Espacial de CCI)",
+                                  gp = grid::gpar(fontsize = 14, fontface = "bold")))
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# MAPAS COMPARATIVOS: ETA-TILDE (Efecto Espacial de GEDI)
+# ══════════════════════════════════════════════════════════════════════════════
+
+p1_eta <- ggplot() +
+  geom_sf(data = mexico_proj, fill = "grey98", color = "grey50", linewidth = 0.4) +
+  geom_point(data = mesh_df_consolidated,
+             aes(x = x, y = y, color = eta_sqrt), size = 1.2, alpha = 0.8) +
+  scale_color_viridis(option = "viridis", name = "η-tilde",
+                      guide = guide_colorbar(barwidth = 0.8, barheight = 8)) +
+  labs(title = "SQRT", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+        legend.position = "right",
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill = "aliceblue", color = NA))
+
+p2_eta <- ggplot() +
+  geom_sf(data = mexico_proj, fill = "grey98", color = "grey50", linewidth = 0.4) +
+  geom_point(data = mesh_df_consolidated,
+             aes(x = x, y = y, color = eta_log), size = 1.2, alpha = 0.8) +
+  scale_color_viridis(option = "viridis", name = "η-tilde",
+                      guide = guide_colorbar(barwidth = 0.8, barheight = 8)) +
+  labs(title = "LOG", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+        legend.position = "right",
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill = "aliceblue", color = NA))
+
+p3_eta <- ggplot() +
+  geom_sf(data = mexico_proj, fill = "grey98", color = "grey50", linewidth = 0.4) +
+  geom_point(data = mesh_df_consolidated,
+             aes(x = x, y = y, color = eta_none), size = 1.2, alpha = 0.8) +
+  scale_color_viridis(option = "viridis", name = "η-tilde",
+                      guide = guide_colorbar(barwidth = 0.8, barheight = 8)) +
+  labs(title = "NONE", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+        legend.position = "right",
+        panel.grid = element_blank(),
+        panel.background = element_rect(fill = "aliceblue", color = NA))
+
+grid.arrange(p1_eta, p2_eta, p3_eta, ncol = 3,
+             top = grid::textGrob("Distribución Espacial de Eta-tilde (Efecto Espacial de GEDI)",
+                                  gp = grid::gpar(fontsize = 14, fontface = "bold")))
+```
+
+---
+
+## DIAGNOSTICO: Por que Beta y Eta son tan pequenos
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# ANÁLISIS DE ESCALAS Y CORRELACIONES
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+
+cat("1. ESCALAS DE LAS VARIABLES\n")
+cat("───────────────────────────────────────────────────────────────────────────────\n")
+cat("Variable           Mín      Máx      Media    Desv.Std\n")
+cat("───────────────────────────────────────────────────────────────────────────────\n")
+cat(sprintf("NFI (Biomasa)   %7.2f  %7.2f  %7.2f  %7.2f\n",
+            min(DATA$agbd.plot, na.rm=TRUE), max(DATA$agbd.plot, na.rm=TRUE),
+            mean(DATA$agbd.plot, na.rm=TRUE), sd(DATA$agbd.plot, na.rm=TRUE)))
+cat(sprintf("CCI (Biomasa)   %7.2f  %7.2f  %7.2f  %7.2f\n",
+            min(DATA$cci.plot, na.rm=TRUE), max(DATA$cci.plot, na.rm=TRUE),
+            mean(DATA$cci.plot, na.rm=TRUE), sd(DATA$cci.plot, na.rm=TRUE)))
+cat(sprintf("GEDI (Altura)   %7.2f  %7.2f  %7.2f  %7.2f\n",
+            min(DATA$hei.plot, na.rm=TRUE), max(DATA$hei.plot, na.rm=TRUE),
+            mean(DATA$hei.plot, na.rm=TRUE), sd(DATA$hei.plot, na.rm=TRUE)))
+cat("───────────────────────────────────────────────────────────────────────────────\n\n")
+
+cat("2. CORRELACIONES ENTRE VARIABLES\n")
+cat("───────────────────────────────────────────────────────────────────────────────\n")
+cor_matrix <- cor(DATA[, c("agbd.plot", "cci.plot", "hei.plot")], use = "complete.obs")
+rownames(cor_matrix) <- c("NFI", "CCI", "GEDI")
+colnames(cor_matrix) <- c("NFI", "CCI", "GEDI")
+print(round(cor_matrix, 3))
+cat("\n")
+
+# Correlación entre CCI y GEDI
+cor_cci_gedi <- cor(DATA$cci.plot, DATA$hei.plot, use = "complete.obs")
+cat(sprintf("Correlacion CCI-GEDI: %.3f\n", cor_cci_gedi))
+if(abs(cor_cci_gedi) > 0.7) {
+  cat("    ALTA COLINEALIDAD detectada! CCI y GEDI están muy correlacionados.\n")
+  cat("    Esto puede hacer que los coeficientes individuales sean pequeños.\n\n")
+}
+
+cat("\n3. CONTRIBUCIÓN DE LOS EFECTOS ESPACIALES\n")
+cat("───────────────────────────────────────────────────────────────────────────────\n")
+# Varianza de los efectos espaciales vs efectos fijos
+var_alpha_spat <- var(model_fit$summary.random[[1]]$mean, na.rm = TRUE)
+var_beta_spat <- var(model_fit$summary.random[[2]]$mean, na.rm = TRUE)
+var_eta_spat <- var(model_fit$summary.random[[3]]$mean, na.rm = TRUE)
+
+cat(sprintf("Varianza de alpha.spat (efectos espaciales del intercepto): %.4f\n", var_alpha_spat))
+cat(sprintf("Varianza de beta.spat  (efectos espaciales de CCI):         %.4f\n", var_beta_spat))
+cat(sprintf("Varianza de eta.spat   (efectos espaciales de GEDI):        %.4f\n", var_eta_spat))
+cat("\n")
+cat("Los efectos espaciales (alpha.spat, beta.spat, eta.spat) capturan\n")
+cat("   la variabilidad que no se explica por los efectos fijos.\n")
+cat("   Si tienen alta varianza, están 'absorbiendo' mucha información.\n\n")
+
+cat("\n4. MODELO CON EFECTOS FIJOS SOLAMENTE (Sin componente espacial)\n")
+cat("───────────────────────────────────────────────────────────────────────────────\n")
+# Ajustar un modelo simple sin efectos espaciales para comparar
+LM_simple <- lm(sqrt(agbd.plot) ~ cci.plot + hei.plot, data = DATA)
+cat("\nCoeficientes del modelo lineal simple (sin efectos espaciales):\n")
+print(summary(LM_simple)$coefficients[, 1:2])
+cat("\n")
+cat(sprintf("R² del modelo simple: %.4f\n", summary(LM_simple)$r.squared))
+cat(sprintf("R² ajustado:          %.4f\n", summary(LM_simple)$adj.r.squared))
+
+
+```
+

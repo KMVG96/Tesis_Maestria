@@ -11,7 +11,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 
 ```{r setup, include=FALSE}
-##install.packages("readxl")
+#install.packages("readxl")
 library(readxl)
 library(dplyr)
 library(tidyverse)   # Incluye dplyr, ggplot2, readr, etc.
@@ -20,11 +20,6 @@ library(DataExplorer)  # Automatiza parte del EDA
 
 ```
 
-## R Markdown
-
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
 
 ```{r cars}
 
@@ -34,28 +29,40 @@ ruta ="C:/Users/katy/Documents/Tesis_Maestria/Tesis_Mestria/Datos_Crudos/CONAFOR
 # Leer el archivo Excel
 datos <- read_excel(ruta)
 
-# Ver los primeros registros
-head(datos)
 
 
 ```
+```{r}
+# Ver los primeros registros
+head(datos)
+colnames(datos)
+length(unique(datos$IdConglomerado))
 
-## Including Plots
 
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
+```
+```{r}
 # Filtrar por estado con clave 23,  año 2019
 datos_filtrados <- datos %>% filter(Cve_Estado_C3 == 23 & Anio_C3 == 2019 & Especie_APG_C3 != "NULL" )
+length(unique(datos_filtrados$IdConglomerado))
+length(datos_filtrados$NoIndividuo_C3)
 
-## Geneno un nuebo data set solo con las variables que me importan 
+```
+
+
+```{r pressure, echo=FALSE}
+
+
+## Geneno un nuevo data set solo con las variables que me importan 
 
 dataset_QR<-datos_filtrados %>% select(IdConglomerado,X_C3, Y_C3, NoIndividuo_C3, DiametroNormal_C3,
                                        AlturaTotal_C3, AreaBasal_C3, NombreComun_C3, Familia_APG_C3,
-                                       Genero_APG_C3, Especie_APG_C3)
+                                       Genero_APG_C3, Especie_APG_C3, biomasa_kg_C3)
 
 # Ver las primeras filas del resultado
 head(dataset_QR)
+
+length(unique(dataset_QR$IdConglomerado))
+
 ```
 
 ¿
@@ -71,7 +78,32 @@ dataset_QR_filtro<-dataset_QR %>% filter( DiametroNormal_C3< 999990 & AlturaTota
 
 summary(dataset_QR_filtro) 
 
+
+
 ```
+
+
+```{r}
+
+# RUTA DEL ARCHIVO
+ruta_2 ="C:/Users/katy/Documents/Tesis_Maestria/Tesis_Mestria/Limpieza_EDA/conglomerado.xlsx"
+
+# Leer el archivo Excel
+datos_2 <- read_excel(ruta_2)
+
+
+## Verificar que todos los conglomerados fueron muestreados 
+tabla_final <- dataset_QR_filtro %>%
+  left_join(
+    datos_2 %>% select(IDConglomerado, Muestreado_C3),
+    by = c("IdConglomerado" = "IDConglomerado")
+  )
+unique(tabla_final$Muestreado_C3)
+
+```
+
+
+
 ```{r}
 # Histograma del diámetro normal
 hist(dataset_QR_filtro$DiametroNormal_C3,
@@ -94,17 +126,61 @@ hist(dataset_QR_filtro$ AreaBasal_C3 ,
      ylab="Frecuencia",
      col = "lightblue",
      border = "white")
+# Histograma de Biomasa
+hist(dataset_QR_filtro$biomasa_kg_C3  ,
+     main = "Histograma del biomasa",
+     xlab = "Biomasa",
+     ylab="Frecuencia",
+     col = "lightblue",
+     border = "white")
      
 ```
+```{r}
+windows()
+boxplot(dataset_QR_filtro$biomasa_kg_C3)
+```
 
+
+```{r}
+library(dplyr)
+
+biomasa_3000 <- dataset_QR_filtro %>%
+  filter(biomasa_kg_C3 > 3000)
+
+nrow(biomasa_3000)
+
+```
+```{r}
+biomasa_3000 %>%
+  arrange(desc(biomasa_kg_C3))
+
+```
+```{r}
+library(dplyr)
+
+biomasa_c<- dataset_QR_filtro %>%
+  filter(biomasa_kg_C3 <2000)
+
+nrow(biomasa_c)
+```
+```{r}
+hist(biomasa_c$biomasa_kg_C3  ,
+     main = "Histograma del biomasa",
+     xlab = "Biomasa",
+     ylab="Frecuencia",
+     col = "lightblue",
+     border = "white")
+```
 
 
 ```{r}
 # Exportar el dataset a un archivo CSV
-write.csv(dataset_QR_filtro, "dataset_QR_filtro.csv", row.names = FALSE)
+write.csv(dataset_QR_filtro, "dataset_QR_filtro_biomasa.csv", row.names = FALSE)
 
 ## NÚMERO TOTAL DE ESPECIES 
 length(unique(dataset_QR_filtro$Especie_APG_C3))
+length(unique(tabla_final$IdConglomerado))
+length(tabla_final$NoIndividuo_C3)
 
 ```
 
@@ -128,20 +204,19 @@ pca_data <- dataset_QR_filtro %>%
 
 
 ```{r}
-GEN<- substr(dataset_QR_filtro$Genero_APG_C3, 1,3)
-ESP<- substr(dataset_QR_filtro$Especie_APG_C3,1,3)
-join<- paste0(GEN,ESP)
+GEN <- substr(dataset_QR_filtro$Genero_APG_C3, 1, 3)
+ESP <- substr(dataset_QR_filtro$Especie_APG_C3, 1, 3)
+Clave_ESP <- paste0(GEN, ESP)  # Cambiado de "join" a "Clave_ESP"
 N_Cientifico <- paste(dataset_QR_filtro$Genero_APG_C3, dataset_QR_filtro$Especie_APG_C3)
 
-
-dataset_QR_filtro$Clave_ESP <- Clave_ESP
+# Agregar las columnas al dataframe
+dataset_QR_filtro$Clave_ESP <- Clave_ESP  # Descomentar esta línea
 dataset_QR_filtro$N_Cientifico <- N_Cientifico
+
 # Ver cuántos valores únicos tiene
 length(unique(dataset_QR_filtro$Clave_ESP))
 
-head(dataset_QR_filtro[, c("Genero_APG_C3", "Especie_APG_C3", "Clave_ESP")])
-
-
+head(dataset_QR_filtro[, c("Genero_APG_C3", "Especie_APG_C3", "Clave_ESP", "N_Cientifico")])
 
 frecuencia_especies <- dataset_QR_filtro %>%
   group_by(Clave_ESP, Genero_APG_C3, Especie_APG_C3, N_Cientifico) %>%
@@ -151,6 +226,78 @@ frecuencia_especies <- dataset_QR_filtro %>%
 print(frecuencia_especies)
 
 ```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Calcular frecuencia por nombre científico
+frecuencia_especies <- dataset_QR_filtro %>%
+  group_by(N_Cientifico) %>%
+  summarise(frecuencia = n(), .groups = "drop") %>%
+  arrange(desc(frecuencia)) %>%
+  head(15)  # Top 15 especies más comunes
+
+# Crear la gráfica
+ggplot(frecuencia_especies, aes(x = reorder(N_Cientifico, frecuencia), y = frecuencia)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label = frecuencia), hjust = -0.2, size = 3) +
+  coord_flip() +
+  labs(
+    title = "Especies más comunes",
+    subtitle = "Top 15 por frecuencia",
+    x = "Nombre científico",
+    y = "Frecuencia"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(face = "italic", size = 9),
+    plot.title = element_text(face = "bold", size = 14)
+  )
+```
+
+```{r}
+# Ver qué hay en esa primera posición
+frecuencia_especies %>% head(10)
+
+# Verificar si hay valores vacíos o NA en N_Cientifico
+sum(is.na(dataset_QR_filtro$N_Cientifico))
+sum(dataset_QR_filtro$N_Cientifico == "")
+sum(dataset_QR_filtro$N_Cientifico == " ")
+sum(dataset_QR_filtro$N_Cientifico == "NA NA")
+
+# Ver valores únicos sospechosos
+dataset_QR_filtro %>%
+  filter(N_Cientifico == "" | is.na(N_Cientifico) | N_Cientifico == "NA NA" | N_Cientifico == " ") %>%
+  nrow()
+
+# Ver los primeros valores de Genero y Especie que podrían estar vacíos
+dataset_QR_filtro %>%
+  filter(Genero_APG_C3 == "" | is.na(Genero_APG_C3) | Especie_APG_C3 == "" | is.na(Especie_APG_C3)) %>%
+  head(10)
+```
+
+```{r}
+ggplot(frecuencia_especies, aes(x = reorder(N_Cientifico, frecuencia), y = frecuencia)) +
+  geom_bar(stat = "identity", fill = "forestgreen") +
+  geom_text(aes(label = format(frecuencia, big.mark = ",")), hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(
+    title = "Especies más comunes",
+    subtitle = "Top 15 por frecuencia",
+    x = "Nombre científico",
+    y = "Frecuencia"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(face = "italic", size = 9),
+    plot.title = element_text(face = "bold", size = 14)
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+```
+
+
+
 
 ## Ecuaciones por especie 
  5 y 8 y 7

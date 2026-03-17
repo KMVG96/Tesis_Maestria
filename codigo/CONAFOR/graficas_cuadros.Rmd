@@ -1,0 +1,405 @@
+---
+title: "tesis_insumos"
+author: "Katia M. Villarnobo Gonzalez"
+date: "2025-11-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+# Cargar librerías necesarias
+library(ggplot2)
+library(gridExtra)
+library(grid)
+
+# Crear el dataframe con la información de los insumos
+insumos_data <- data.frame(
+  Insumo = c(
+    "Inventario Nacional\nForestal (INFyS)",
+    "Mapa de Altura\nGEDI-Landsat",
+    "Mapa de Biomasa\nESA, (CCI)", # Climate Change Initiative 
+    "Límite Geográfico\nQuintana Roo"
+  ),
+  
+  Información = c(
+    "Biomasa aérea (AGBD)\nestimada por alometrías.\nParcelas circulares de\n56.42 m de radio (~1 ha)",
+    
+    "Altura del dosel forestal\nintegrado de mediciones\nlidar GEDI y datos\nópticos Landsat",
+    
+    "Biomasa aérea derivada\nde radar SAR (ALOS-2,\nSentinel-1) e ICESat-2.\nMapa global v4.0",
+    
+    "Polígono vectorial del\nestado de Quintana Roo\npara delimitar área\nde estudio"
+  ),
+  
+  Fuente = c(
+    "CONAFOR\n(Comisión Nacional\nForestal, México)",
+    
+    "NASA\n(Dubayah et al. 2020)\nPotapov et al. 2021",
+    
+    "ESA\n(Agencia Espacial\nEuropea)\nSantoro et al. 2024",
+    
+    "INEGI/CONABIO\n(México)"
+  ),
+  
+  Resolución = c(
+    "Puntos discretos\n(parcelas de campo)\n~1 parcela/5-10 km²",
+    
+    "~30 metros\n(pixel)",
+    
+    "~100 metros\n(pixel)",
+    
+    "Vector\n(límite administrativo)"
+  ),
+  
+  stringsAsFactors = FALSE
+)
+
+# Función para crear la tabla con estilo profesional
+crear_tabla_insumos <- function(data) {
+  # Definir colores personalizados
+  color_header <- "#2C3E50"
+  color_row1 <- "#ECF0F1"
+  color_row2 <- "#FFFFFF"
+  color_border <- "#BDC3C7"
+  
+  # Crear el tema de la tabla
+  tema <- ttheme_minimal(
+    core = list(
+      fg_params = list(
+        hjust = 0.5,
+        vjust = 0.5,
+        x = 0.5,
+        fontsize = 10,
+        lineheight = 1.2
+      ),
+      bg_params = list(
+        fill = c(color_row1, color_row2),
+        col = color_border,
+        lwd = 1.5
+      ),
+      padding = unit(c(8, 8), "mm")
+    ),
+    colhead = list(
+      fg_params = list(
+        col = "white",
+        fontface = "bold",
+        fontsize = 11,
+        hjust = 0.5,
+        vjust = 0.5
+      ),
+      bg_params = list(
+        fill = color_header,
+        col = color_border,
+        lwd = 2
+      ),
+      padding = unit(c(6, 6), "mm")
+    ),
+    rowhead = list(
+      fg_params = list(fontface = "bold")
+    )
+  )
+  
+  # Crear la tabla
+  tabla <- tableGrob(
+    data,
+    rows = NULL,
+    theme = tema
+  )
+  
+  # Ajustar anchos de columna
+  tabla$widths <- unit(c(0.20, 0.32, 0.25, 0.23), "npc")
+  
+  return(tabla)
+}
+
+# Crear la tabla
+tabla_final <- crear_tabla_insumos(insumos_data)
+
+# Crear el título
+titulo <- textGrob(
+  "Insumos del Modelo Geoestadístico Bayesiano (GMB)",
+  gp = gpar(fontsize = 16, fontface = "bold", col = "#2C3E50")
+)
+
+# Crear subtítulo
+subtitulo <- textGrob(
+  "Estimación de Biomasa Aérea en Quintana Roo, México",
+  gp = gpar(fontsize = 12, fontface = "italic", col = "#34495E")
+)
+
+# Combinar todo en un layout (SIN pie de página)
+layout_final <- arrangeGrob(
+  titulo,
+  subtitulo,
+  tabla_final,
+  heights = unit(c(0.8, 0.5, 8), "cm"),
+  padding = unit(1, "cm")
+)
+
+# Guardar la imagen en Descargas
+ruta_descargas <- "C:/Users/katy/Downloads/tabla_insumos_GMB.png"
+
+# Guardar con alta resolución
+ggsave(
+  filename = ruta_descargas,
+  plot = layout_final,
+  width = 12,
+  height = 6.5,
+  dpi = 300,
+  bg = "white"
+)
+
+# Mostrar en pantalla
+grid.newpage()
+grid.draw(layout_final)
+
+# Mensaje de confirmación
+cat("\n✅ Tabla exportada exitosamente en:", ruta_descargas, "\n")
+```
+
+
+
+
+```{r pressure, echo=FALSE}
+# Cargar librerías necesarias
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(gtable)
+
+# Crear el dataframe comparativo
+comparacion_data <- data.frame(
+  Característica = c(
+    "Nombre del\nModelo",
+    "Fórmula\nMatemática",
+    "Efectos\nEspaciales",
+    "Autocorrelación\nEspacial",
+    "Número de\nParámetros",
+    "Componentes\nModelados",
+    "Malla FEM\n(Triangulación)",
+    "Precisión\n(R²)",
+    "RMSE\n(Mg/ha)",
+    "Complejidad\nComputacional",
+    "Uso en el\nCódigo"
+  ),
+  
+  Modelo_Simple = c(
+    "Regresión Lineal\nMúltiple (OLS)",
+    
+    "y(s) = α + β·x₁(s) +\nη·x₂(s) + ε(s)",
+    
+    "Ninguno\n(parámetros\nconstantes)",
+    
+    "Ignorada\n(asume residuos\nindependientes)",
+    
+    "3 parámetros:\nα, β, η",
+    
+    "• Intercepto fijo\n• Coef. CCI fijo\n• Coef. GEDI fijo\n• Error aleatorio",
+    
+    "No requerida\n(modelo no\nespacial)",
+    
+    "~0.62\n(62% varianza\nexplicada)",
+    
+    "~35 Mg/ha\n(estimado)",
+    
+    "Baja\n(segundos)",
+    
+    "Pedagógico\n(líneas 235-250)\nDemostración INLA"
+  ),
+  
+  Modelo_GMB_Paper = c(
+    "Modelo Geoestadístico\nBayesiano (GMB)",
+    
+    "y(s) = (α + α̃(s)) +\n(β + β̃(s))·x₁(s) +\n(η + η̃(s))·x₂(s) + ε(s)",
+    
+    "Tres efectos:\nα̃(s), β̃(s), η̃(s)\n(varían espacialmente)",
+    
+    "Modelada con\ncovarianza Matérn\n(smooth=1)",
+    
+    "3 + 3k parámetros:\n3 fijos + 3×k\nefectos espaciales",
+    
+    "• Intercepto variable\n• Coef. CCI variable\n• Coef. GEDI variable\n• Error espacial",
+    
+    "Esencial\n(k vértices,\nmax.edge=8km)",
+    
+    "0.79\n(79% varianza\nexplicada)",
+    
+    "21.55 Mg/ha\n(reportado en paper)",
+    
+    "Media-Alta\n(60-120 min)",
+    
+    "Modelo Principal\n(líneas 290-330)\nImplementación real"
+  ),
+  
+  stringsAsFactors = FALSE
+)
+
+# Función para crear tabla con colores y formato especial
+crear_tabla_comparativa <- function(data) {
+  # Colores personalizados
+  color_header <- "#2C3E50"
+  color_col1 <- "#34495E"
+  color_simple <- "#FFE6E6"      # Rojo claro para modelo simple
+  color_gmb <- "#E6F9E6"         # Verde claro para modelo GMB
+  color_border <- "#95A5A6"
+  
+  # Crear tema personalizado
+  tema <- ttheme_minimal(
+    core = list(
+      fg_params = list(
+        hjust = 0.5,
+        vjust = 0.5,
+        x = 0.5,
+        fontsize = 9,
+        lineheight = 1.3
+      ),
+      bg_params = list(
+        fill = matrix(
+          c(rep(color_col1, 11),        # Primera columna
+            rep(color_simple, 11),       # Segunda columna (modelo simple)
+            rep(color_gmb, 11)),         # Tercera columna (modelo GMB)
+          ncol = 3
+        ),
+        col = color_border,
+        lwd = 1.5
+      ),
+      padding = unit(c(6, 6), "mm")
+    ),
+    colhead = list(
+      fg_params = list(
+        col = "white",
+        fontsize = 11,
+        hjust = 0.5,
+        vjust = 0.5
+      ),
+      bg_params = list(
+        fill = color_header,
+        col = color_border,
+        lwd = 2
+      ),
+      padding = unit(c(5, 5), "mm")
+    )
+  )
+  
+  # Cambiar nombres de columnas
+  colnames(data) <- c(
+    "Característica",
+    "Modelo Simple\n(Regresión Lineal)",
+    "Modelo del Paper\n(GMB Espacial)"
+  )
+  
+  # Crear tabla
+  tabla <- tableGrob(
+    data,
+    rows = NULL,
+    theme = tema
+  )
+  
+  # Ajustar anchos de columna
+  tabla$widths <- unit(c(0.25, 0.37, 0.38), "npc")
+  
+  # Colorear texto de primera columna en blanco
+  for(i in 2:12) {  # Filas de datos (excluyendo header)
+    tabla$grobs[[i]]$gp$col <- "white"
+  }
+  
+  return(tabla)
+}
+
+# Crear la tabla
+tabla_comparativa <- crear_tabla_comparativa(comparacion_data)
+
+# Crear título principal
+titulo <- textGrob(
+  "Comparación: Modelo Simple vs. Modelo Geoestadístico del Paper",
+  gp = gpar(fontsize = 16, col = "#2C3E50")
+)
+
+# Crear subtítulo
+subtitulo <- textGrob(
+  "Análisis de Diferencias en Modelado de Biomasa Aérea",
+  gp = gpar(fontsize = 12, col = "#34495E")
+)
+
+# Combinar todo en layout (SIN explicación ni leyenda)
+layout_final <- arrangeGrob(
+  titulo,
+  subtitulo,
+  tabla_comparativa,
+  heights = unit(c(0.8, 0.5, 10), "cm"),
+  padding = unit(0.8, "cm")
+)
+
+# Guardar imagen
+ruta_descargas <- "C:/Users/katy/Downloads/comparacion_modelos_GMB.png"
+
+ggsave(
+  filename = ruta_descargas,
+  plot = layout_final,
+  width = 14,
+  height = 10,
+  dpi = 300,
+  bg = "white"
+)
+
+# Mostrar en pantalla
+grid.newpage()
+grid.draw(layout_final)
+
+# Mensaje de confirmación
+cat("\n Tabla comparativa exportada en:", ruta_descargas, "\n")
+cat("Dimensiones: 14\" × 10\" @ 300 DPI\n")
+```
+
+**Ganancia:** +17% de varianza explicada gracias a efectos espaciales.
+
+---
+
+## **Diagrama de Flujo del Código**
+```
+┌─────────────────────────────────────┐
+│  Sección 1: Carga de Datos          │
+│  (Líneas 140-220)                   │
+└──────────────┬──────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────┐
+│  Sección 2: Ejemplo Pedagógico      │  MODELO SIMPLE
+│  (Líneas 235-250)                   │ (NO se usa después)
+│  • lm() vs. inla()                  │
+│  • Sin efectos espaciales           │
+└──────────────┬──────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────┐
+│  Sección 3: Construcción de Malla   │
+│  (Líneas 255-265)                   │
+│  • mesh con k vértices              │
+└──────────────┬──────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────┐
+│  Sección 4: Modelo GMB Completo     │ MODELO PRINCIPAL
+│  (Líneas 290-330)                   │ (Usado en TODO)
+│  • Efectos espaciales               │
+│  • α̃(s), β̃(s), η̃(s)                │
+└──────────────┬──────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────┐
+│  Sección 5: Validación y Predicción │
+│  (Líneas 350-600)                   │
+│  • Solo usa Modelo GMB              │
+└─────────────────────────────────────┘
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
